@@ -14,6 +14,8 @@
     ground    floor height in px from the bottom (default 0)
     xmin/xmax left/right walls in % of the width (default 0/100)
     seed      test with a throwaway pet with this look (colours, pattern)
+    form      test with a throwaway adult of this form id (see the gallery)
+    gallery   1 = show every form on a grid (spoilers!), page=N to flip
     stage     test with a throwaway pet at this stage: egg, baby, child, teen, adult or elder
     slot      name of the save slot, to run more than one pet (default main)
     reset     1 = start over with a new egg
@@ -35,6 +37,11 @@
   #hud{position:fixed;left:8px;top:8px;font:12px/1.35 monospace;color:#fff;background:#000a;
     padding:6px 8px;border-radius:6px;white-space:pre;display:none;pointer-events:none}
   body.debug #hud{display:block}
+  body.gallery{background:#2a1f44;font-family:system-ui,sans-serif}
+  .glabel{position:fixed;transform:translateX(-50%);text-align:center;color:#fff;text-decoration:none;font-size:12px;line-height:1.25}
+  .glabel b{display:block;font-size:14px}
+  .glabel span{opacity:.6;font-size:10px}
+  .ghead{position:fixed;left:12px;top:8px;color:#fff;font-size:14px;opacity:.8}
   /* thought bubble: moved over the pet's head every frame */
   #bubble{position:fixed;left:0;top:0;margin:-62px 0 0 -6px;padding:10px 12px;background:#fff;border-radius:22px;
     box-shadow:0 3px 10px #0004;pointer-events:none;will-change:transform;opacity:0;transition:opacity .25s;
@@ -122,7 +129,7 @@ const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 // One pet per slot, kept in this browser source's local storage. ?slot= runs a separate pet, ?reset=1
 // starts over. Test runs (?stage= or ?seed= given) build a throwaway pet and never touch the save.
 const SAVE_KEY = 'streampet.v1.' + (Q.get('slot') || 'main');
-const TESTING = Q.has('stage') || Q.has('seed');
+const TESTING = Q.has('stage') || Q.has('seed') || Q.has('form');
 const TRAITS = ['fed', 'rested', 'playful', 'social', 'hyped', 'calm', 'nightowl', 'generous'];
 
 function newSave(seed, parent) {
@@ -135,7 +142,7 @@ function newSave(seed, parent) {
     traits: Object.fromEntries(TRAITS.map(k => [k, 0])),
     tod: [0, 0, 0, 0],                       // visible hours by time of day: night, morning, afternoon, evening
     events: { chat: 0, chatters: 0, raids: 0, subs: 0, bits: 0 },
-    hatchMonth: null, teen: null, form: null, formName: null,
+    hatchMonth: null, hatchDay: null, hatchHour: null, flags: {}, teen: null, form: null, formName: null,
     lineage: parent ? [...parent.lineage] : [],
   };
 }
@@ -144,6 +151,7 @@ function loadSave() {
     const s = newSave(CFG.seed);
     s.stage = ['egg', 'baby', 'child', 'teen', 'adult', 'elder'].includes(Q.get('stage')) ? Q.get('stage') : 'baby';
     s.name = CFG.name || 'Test';
+    s.formId = Q.get('form'); // resolved once the form table exists
     return s;
   }
   try {
@@ -301,7 +309,7 @@ function makePalette(seed, hue) {
 
 // ---------------- recipes ----------------
 // A critter is a recipe: a body, plus parts plugged into sockets that the body works out from its own
-// shape. Every stage is a recipe, and so is every adult form (see FORMS). Recipes are plain JSON so a
+// shape. Every stage is a recipe, and so is every adult form (see buildForms). Recipes are plain JSON so a
 // save can keep the exact one its pet was built from.
 const STAGES = {
   egg:   { body: { type: 'egg', w: 7, h: 9, d: 7 } },
@@ -315,10 +323,18 @@ const STAGES = {
            feet: { type: 'stubby' }, eyes: 'round', mouth: 'dot' },
 };
 
-// Body shapes: parameters for blob(). flat squashes the bottom half, fill > 1 fills out the corners,
-// taper > 0 narrows the top (< 0 widens it, like a slumped blob).
+// Body shapes. flat squashes the bottom half, fill > 1 fills out the corners, taper > 0 narrows the top
+// and widens the bottom. size is the adult [w, h, d]; teens are built smaller. move scales the hop
+// height, hop distance and mass; hover bodies float instead of standing.
 const BODIES = {
-  round:  { flat: 0.35, fill: 1.08, taper: 0 },
+  round:  { size: [10, 8, 8],  flat: 0.35, fill: 1.08, taper: 0,    move: [1, 1, 1] },
+  chonky: { size: [12, 8, 9],  flat: 0.5,  fill: 1.16, taper: 0,    move: [0.82, 0.85, 1.4] },
+  tall:   { size: [8, 11, 7],  flat: 0.2,  fill: 1.08, taper: 0.08, move: [1.12, 0.95, 1] },
+  tiny:   { size: [8, 7, 7],   flat: 0.35, fill: 1.1,  taper: 0,    move: [1.15, 1.2, 0.8] },
+  long:   { size: [13, 7, 7],  flat: 0.4,  fill: 1.12, taper: 0,    move: [0.9, 1.15, 1.1] },
+  bean:   { size: [9, 10, 8],  flat: 0.3,  fill: 1.06, taper: 0.18, move: [1, 1, 1] },
+  blob:   { size: [12, 7, 9],  flat: 0.6,  fill: 1.12, taper: 0.35, move: [0.75, 0.8, 1.3] },
+  floaty: { size: [9, 9, 8],   flat: 0,    fill: 1.0,  taper: 0,    move: [0.8, 1, 0.9], hover: true },
 };
 
 function blob(w, h, d, paint, { flat = 0.35, fill = 1.08, taper = 0 } = {}) {
@@ -326,7 +342,7 @@ function blob(w, h, d, paint, { flat = 0.35, fill = 1.08, taper = 0 } = {}) {
   const x0 = -Math.floor(w / 2), z0 = -Math.floor(d / 2);
   for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) for (let z = 0; z < d; z++) {
     const nx = (x + 0.5 - w / 2) / (w / 2), ny = (y + 0.5 - h / 2) / (h / 2), nz = (z + 0.5 - d / 2) / (d / 2);
-    const k = 1 + taper * ny;  // >0 narrows the top (eggs)
+    const k = 1 + taper * ny;
     const ny2 = ny < 0 ? ny * (1 - flat) : ny;
     if ((nx * k) ** 2 + ny2 * ny2 + (nz * k) ** 2 <= fill) vox.set(x0 + x, y, z0 + z, paint(nx, ny, nz));
   }
@@ -359,74 +375,304 @@ function mirrorVox(vox) {
   for (const [x, y, z, c] of vox.each()) out.set(-x - 1, y, z, c);
   return out;
 }
+const voxOf = (cells, c) => { const v = new Vox(); for (const [x, y, z = 0, cc = c] of cells) v.set(x, y, z, cc); return v; };
 
-// Ears / horns sit on top of the head. Each generator draws the RIGHT (+x) one, with its base at
-// y = 0 around x = 0 and "inward" toward -x; the left one is a mirror image.
-// motion: how the part reacts to hops. loose = floppy spring, stiff = barely moves.
-const EARS = {
-  nub(p, pal) {
-    const vox = new Vox();
-    for (let y = 0; y < p.len; y++) vox.set(0, y, 0, pal.body);
-    return { vox, motion: 'loose' };
+// Every part generator gets a context `k` describing the body it's going on, plus its own params
+// (len), and returns a list of attachments: { vox, at, origin, motion, side }. `at` is a point in the
+// body's voxel space, `origin` the point in the part's own space that lands on it. Paired parts are
+// drawn once for the RIGHT (+x) side, with "inward" toward -x, and mirrored.
+// motion: loose (floppy spring), stiff, tail, wing (flaps in the air), flicker (flames), none.
+const one = (vox, at, origin = [0, 0, 0], motion = 'none', side = 0) => [{ vox, at, origin, motion, side }];
+function pair(k, vox, at, origin, motion) {
+  return [
+    { vox, at, origin, motion, side: 1 },
+    { vox: mirrorVox(vox), at: [2 * k.cx - at[0], at[1], at[2]], origin: [-origin[0], origin[1], origin[2]], motion, side: -1 },
+  ];
+}
+// right-hand edge of the body at row y (continuous x of its outer face)
+const rightEdge = (k, y, z = k.zm) => { for (let x = k.x0 + k.S.w; x >= k.x0; x--) if (k.body.has(x, y, z)) return x + 1; return k.cx; };
+
+// --- head: ears, horns and things on top ---
+const earSocket = (k) => {
+  const i = k.mirror(Math.max(1, Math.round(k.S.w * 0.2))), x = k.col(i);
+  return [x + 0.5, (k.body.topAt(x, k.zm) ?? k.S.h - 1) + 0.6, k.zm + 0.5];
+};
+const topCenter = (k, z = k.zm) => [k.cx, (k.body.topAt(Math.floor(k.cx - 0.01), z) ?? k.S.h - 1) + 0.6, z + 0.5];
+const HEADS = {
+  none: () => [],
+  nub: (k, L) => pair(k, voxOf(Array.from({ length: L }, (_, y) => [0, y]), k.pal.body), earSocket(k), [0.5, 0, 0.5], 'loose'),
+  point(k, L) {
+    const c = [];
+    for (let y = 0; y < L + 1; y++) { c.push([0, y, 0, y === L ? k.pal.accent : k.pal.body]); if (y < L) c.push([-1, y, 0, k.pal.body]); }
+    return pair(k, voxOf(c), earSocket(k), [0.5, 0, 0.5], 'loose');
   },
-  point(p, pal) {
-    const vox = new Vox();
-    for (let y = 0; y < p.len; y++) {
-      vox.set(0, y, 0, y === p.len - 1 ? pal.accent : pal.body);
-      if (y < p.len - 1) vox.set(-1, y, 0, pal.body);
+  long(k, L) {  // bunny ears, pale on the inside
+    const c = [];
+    for (let y = 0; y < L + 3; y++) { c.push([0, y, 0, k.pal.body]); if (y > 0 && y < L + 2) c.push([0, y, 1, k.pal.belly]); }
+    return pair(k, voxOf(c), earSocket(k), [0.5, 0, 0.5], 'loose');
+  },
+  floppy(k, L) {  // up a little, then over and down the side
+    const c = [[0, 0], [0, 1], [1, 1], [1, 2]];
+    for (let i = 0; i < L; i++) c.push([2 + i, 1 - Math.floor(i * 0.7)], [2 + i, 2 - Math.floor(i * 0.7)]);
+    return pair(k, voxOf(c, k.pal.body), earSocket(k), [0.5, 0, 0.5], 'loose');
+  },
+  horns(k, L) {
+    const c = [[0, 0], [-1, 0], [0, 1], [-1, 1]];
+    for (let i = 0; i < L; i++) c.push([Math.ceil(i * 0.6), 2 + i]);
+    return pair(k, voxOf(c, k.pal.horn), earSocket(k), [0.5, 0, 0.5], 'stiff');
+  },
+  antlers(k, L) {
+    const c = [];
+    for (let y = 0; y < L + 2; y++) c.push([0, y]);
+    c.push([1, 2], [2, 2], [2, 3], [-1, L + 1], [-1, L + 2], [1, L + 1], [2, L + 2]);
+    return pair(k, voxOf(c, k.pal.antler), earSocket(k), [0.5, 0, 0.5], 'stiff');
+  },
+  antenna(k, L) {
+    const c = [];
+    for (let y = 0; y < L + 2; y++) c.push([0, y, 0, k.pal.dark]);
+    for (const [x, y] of [[0, 0], [1, 0], [0, 1], [1, 1]]) c.push([x, L + 2 + y, 0, k.pal.glow]);
+    return pair(k, voxOf(c), earSocket(k), [0.5, 0, 0.5], 'loose');
+  },
+  fins(k, L) {  // fins on the sides of the head
+    const y = Math.round(k.S.h * 0.62), c = [];
+    for (let i = 0; i < L + 1; i++) for (let j = 0; j <= L - i; j++) c.push([i, j]);
+    c.push([0, -1]);
+    return pair(k, voxOf(c, k.pal.accent), [rightEdge(k, y) - 0.4, y, k.zm + 0.5], [0, 0, 0.5], 'loose');
+  },
+  crest(k, L) {  // a fan of spikes in the middle of the head
+    const c = [];
+    for (let x = -3; x <= 2; x++) {
+      const hgt = L + 1 - Math.abs(x + 0.5) * 1.1;
+      for (let y = 0; y < hgt; y++) c.push([x, y, 0, y >= hgt - 1 ? k.pal.accent : k.pal.body]);
     }
-    return { vox, motion: 'loose' };
+    return one(voxOf(c), topCenter(k), [0, 0, 0.5], 'stiff');
+  },
+  mushroom(k, L) {
+    const c = [[-1, 0], [0, 0], [-1, 1], [0, 1]].map(([x, y]) => [x, y, 0, k.pal.belly]);
+    const w = 2 + Math.min(L, 3);
+    for (let x = -w; x < w; x++) for (let z = -1; z <= 1; z++) {
+      c.push([x, 2, z, (x + z) % 3 === 0 ? 0xffffff : k.pal.accent]);
+      if (Math.abs(x + 0.5) < w - 1) c.push([x, 3, z, k.pal.accent]);
+    }
+    return one(voxOf(c), topCenter(k), [0, 0, 0.5], 'loose');
+  },
+  crown(k) {
+    const g = 0xffd23f, c = [];
+    for (let x = -2; x < 2; x++) c.push([x, 0, 0, g]);
+    c.push([-2, 1, 0, g], [-2, 2, 0, g], [1, 1, 0, g], [1, 2, 0, g], [-1, 1, 0, 0xe0213f], [0, 1, 0, 0xe0213f]);
+    return one(voxOf(c), topCenter(k), [0, 0, 0.5], 'stiff');
   },
 };
 
-// Tails leave the back of the body going toward -z, with their base voxel at the origin.
+// --- back: wings and things on the shoulders or behind ---
+const zBack = (k) => k.z0 + 1;
+const BACKS = {
+  none: () => [],
+  wings(k, L) {
+    const rows = [[1, 2 + L], [0, 2 + L], [0, 1 + Math.floor(L / 2)], [0, 1]];
+    const c = [];
+    rows.forEach(([a, b], y) => { for (let x = a; x <= b; x++) c.push([x, 3 - y, 0, x === b ? k.pal.accent : k.pal.wing]); });
+    const y = Math.round(k.S.h * 0.5);
+    return pair(k, voxOf(c), [rightEdge(k, y, zBack(k)) - 1, y, zBack(k) + 0.5], [0, 1, 0.5], 'wing');
+  },
+  bigwings(k, L) {
+    const span = 5 + L, c = [];
+    for (let y = 0; y < 6; y++) {
+      const a = Math.max(0, y - 2), b = Math.min(span, 2 + y * 2);
+      for (let x = a; x <= b; x++) c.push([x, y, 0, x >= b - 1 || (y === 0 && x % 2) ? k.pal.accent : k.pal.wing]);
+    }
+    const y = Math.round(k.S.h * 0.45);
+    return pair(k, voxOf(c), [rightEdge(k, y, zBack(k)) - 1, y, zBack(k) + 0.5], [0, 1, 0.5], 'wing');
+  },
+  spikes(k, L) {  // a row of spikes along the top, tallest in the middle
+    const v = new Vox(), z = zBack(k), n = Math.max(2, Math.floor(k.S.w / 3));
+    for (let j = 0; j < n; j++) {
+      const i = Math.round((j + 0.5) / n * (k.S.w - 2)) + 1, x = k.col(i);
+      const top = k.body.topAt(x, z) ?? k.S.h - 1;
+      const hgt = Math.max(1, Math.round((L + 1) * (1 - Math.abs(j - (n - 1) / 2) / n)));
+      for (let y = 1; y <= hgt; y++) v.set(x, top + y, z, y === hgt ? k.pal.accent : k.pal.horn);
+    }
+    return one(v, [0, 0, 0]);
+  },
+  shell(k) {  // a dome behind it, showing as a rim around the top and sides
+    const v = new Vox(), rx = k.S.w / 2 + 1, ry = k.S.h / 2 + 0.8, cy = k.S.h / 2;
+    for (let x = Math.floor(k.cx - rx); x <= k.cx + rx; x++) for (let y = 0; y <= k.S.h + 1; y++) for (let z = k.z0 - 2; z <= k.z0; z++) {
+      if (((x + 0.5 - k.cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 > 1) continue;
+      v.set(x, y, z, ((x >> 1) + (y >> 1)) % 2 ? k.pal.accent : k.pal.dark);
+    }
+    return one(v, [0, 0, 0]);
+  },
+  mane(k, L) {  // a ruff of fluff around the head
+    const v = new Vox(), rx = k.S.w / 2 + 1.2, ry = k.S.h / 2 + 1.2, cy = k.S.h * 0.55, z = k.z0 + 1;
+    for (let x = Math.floor(k.cx - rx - 1); x <= k.cx + rx + 1; x++) for (let y = Math.floor(k.S.h * 0.25); y <= k.S.h + 2; y++) {
+      const d = Math.hypot((x + 0.5 - k.cx) / rx, (y + 0.5 - cy) / ry);
+      const jag = 0.18 * (1 + Math.sin((Math.atan2(y - cy, x - k.cx)) * 9)) * (0.6 + L * 0.15);
+      if (d < 0.75 || d > 1 + jag) continue;
+      v.set(x, y, z, d > 1 ? k.pal.accent : k.pal.belly);
+      v.set(x, y, z - 1, k.pal.belly);
+    }
+    return one(v, [0, 0, 0]);
+  },
+  leaf(k, L) {
+    const c = [[0, 0], [0, 1]].map(([x, y]) => [x, y, 0, k.pal.antler]);
+    const rows = [1, 2, 2 + (L > 2 ? 1 : 0), 2, 1, 0];
+    rows.forEach((r, j) => { for (let x = -r; x <= r; x++) c.push([x, 2 + j, 0, x === 0 ? k.pal.leafDark : k.pal.leaf]); });
+    return one(voxOf(c), topCenter(k, zBack(k)), [0.5, 0, 0.5], 'loose');
+  },
+  crystals(k, L) {
+    const v = new Vox(), z = zBack(k);
+    for (const [dx, hgt] of [[0, L + 2], [-2, L], [2, L - 1]]) {
+      const x = Math.floor(k.cx) + dx - (dx > 0 ? 1 : 0), top = k.body.topAt(x, z) ?? k.S.h - 1;
+      for (let y = 1; y <= hgt; y++) v.set(x, top + y, z, y === hgt ? 0xffffff : k.pal.glow);
+    }
+    return one(v, [0, 0, 0]);
+  },
+  sail(k, L) {  // a fin along the back, peaking in the middle
+    const v = new Vox(), z = zBack(k);
+    for (let i = 2; i < k.S.w - 2; i++) {
+      const x = k.col(i), top = k.body.topAt(x, z) ?? k.S.h - 1;
+      const t = Math.abs(i - (k.S.w - 1) / 2) / ((k.S.w - 4) / 2);
+      const hgt = Math.max(1, Math.round((L + 2) * Math.sqrt(Math.max(0, 1 - t * t))));
+      for (let y = 1; y <= hgt; y++) v.set(x, top + y, z, y % 2 ? k.pal.accent : k.pal.dark);
+    }
+    return one(v, [0, 0, 0]);
+  },
+  flame(k, L) {
+    const c = [];
+    const rows = [[-2, 1], [-2, 1], [-1, 1], [-1, 0], [-1, 0]].slice(0, 3 + Math.min(L, 2));
+    rows.forEach(([a, b], y) => { for (let x = a; x <= b; x++) c.push([x, y, 0, y > 1 && (x === a || x === b) ? 0xffd23f : y > 2 ? 0xffe680 : 0xff7a1a]); });
+    return one(voxOf(c), topCenter(k, zBack(k)), [0, 0, 0.5], 'flicker');
+  },
+};
+
+// --- tails: out of the back, then sideways so they peek out past the body ---
+function tailPath(k, reach, rise = 0.25) {
+  const pts = [[0, 0, 0], [0, 0, -1]];
+  for (let x = 1; x <= reach; x++) pts.push([x, Math.floor(x * rise), -1]);
+  return pts;
+}
+const tailSocket = (k) => {
+  const y = Math.round(k.S.h * 0.3), x = Math.floor(k.cx - 0.01);
+  return [x + 0.5, y + 0.5, (k.body.backAt(x, y) ?? k.z0) + 0.6];
+};
+const tailReach = (k, extra) => Math.ceil(k.S.w / 2) + extra;
 const TAILS = {
-  curl(p, pal) {
-    const vox = new Vox();
-    for (let i = 0; i < p.len; i++) vox.set(0, Math.round(i * 0.7), -i, i === p.len - 1 ? pal.accent : pal.body);
-    return { vox, motion: 'tail' };
+  none: () => [],
+  stub: (k) => one(voxOf([[0, 0, 0], [0, 0, -1]], k.pal.body), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1),
+  curl(k, L) {
+    const p = tailPath(k, tailReach(k, 0), 0.2), [ex, ey] = p[p.length - 1];
+    p.push([ex, ey + 1, -1], [ex, ey + 2, -1], [ex - 1, ey + 2, -1]);
+    return one(voxOf(p.map(([x, y, z], i) => [x, y, z, i >= p.length - 2 ? k.pal.accent : k.pal.body])), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  long(k, L) {
+    const p = tailPath(k, tailReach(k, L + 2), 0.3);
+    return one(voxOf(p.map(([x, y, z], i) => [x, y, z, i >= p.length - 2 ? k.pal.accent : k.pal.body])), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  fluffy(k, L) {
+    const p = tailPath(k, tailReach(k, 0), 0.4), [ex, ey] = p[p.length - 1], c = p.map(([x, y, z]) => [x, y, z, k.pal.body]);
+    const r = 1.4 + L * 0.25;
+    for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) for (let z = -3; z <= 3; z++) {
+      if (Math.hypot(x, y, z) <= r) c.push([ex + 1 + x, ey + 1 + y, -1 + z, k.pal.belly]);
+    }
+    return one(voxOf(c), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  club(k, L) {
+    const p = tailPath(k, tailReach(k, 0), 0.1), [ex, ey] = p[p.length - 1], c = p.map(([x, y, z]) => [x, y, z, k.pal.body]);
+    for (let x = 1; x <= 2 + (L > 2 ? 1 : 0); x++) for (let y = -1; y <= 1; y++) for (let z = -2; z <= 0; z++) c.push([ex + x, ey + y, z, k.pal.horn]);
+    return one(voxOf(c), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  fork(k, L) {
+    const p = tailPath(k, tailReach(k, 1 + L), 0.35), [ex, ey] = p[p.length - 1], c = p.map(([x, y, z]) => [x, y, z, k.pal.dark]);
+    c.push([ex + 1, ey, -1, k.pal.accent], [ex + 2, ey, -1, k.pal.accent], [ex + 1, ey + 1, -1, k.pal.accent], [ex + 1, ey - 1, -1, k.pal.accent]);
+    return one(voxOf(c), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  fin(k, L) {
+    const p = tailPath(k, tailReach(k, 0), 0.15), [ex, ey] = p[p.length - 1], c = p.map(([x, y, z]) => [x, y, z, k.pal.body]);
+    for (let i = 1; i <= 2 + Math.min(L, 2); i++) for (let y = -i; y <= i; y++) c.push([ex + i, ey + y, -1, k.pal.accent]);
+    return one(voxOf(c), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  leaf(k, L) {
+    const p = tailPath(k, tailReach(k, 0), 0.3), [ex, ey] = p[p.length - 1], c = p.map(([x, y, z]) => [x, y, z, k.pal.antler]);
+    [[1, 0], [2, 1], [3, 1], [4, 1], [5, 0]].slice(0, 3 + Math.min(L, 2)).forEach(([i, r]) => {
+      for (let y = -r; y <= r; y++) c.push([ex + i, ey + y, -1, y === 0 ? k.pal.leafDark : k.pal.leaf]);
+    });
+    return one(voxOf(c), tailSocket(k), [0.5, 0.5, 0.5], 'tail', 1);
+  },
+  twin(k, L) {  // two thin tails, one out each side
+    const p = tailPath(k, tailReach(k, L), 0.45);
+    return pair(k, voxOf(p.map(([x, y, z], i) => [x, y, z, i >= p.length - 1 ? k.pal.accent : k.pal.body])), tailSocket(k), [0.5, 0.5, 0.5], 'tail');
   },
 };
 
 // Feet are built against the body grid (they need its width), and report how tall they are.
 const FEET = {
+  none: () => null,
   stubby(S, pal, col, mirror) {
-    const vox = new Vox();
-    const fw = S.w >= 9 ? 2 : 1;
-    const F = Math.max(0, Math.round(S.w * 0.18));
+    const vox = new Vox(), fw = S.w >= 9 ? 2 : 1, F = Math.max(0, Math.round(S.w * 0.18));
     const c = pal.pattern === 'socks' ? pal.accent : pal.dark;
-    for (const i of [F, mirror(F) - fw + 1]) {
-      for (let x = 0; x < fw; x++) for (let z = 0; z < 2; z++) vox.set(col(i + x), 0, z, c);
+    for (const i of [F, mirror(F) - fw + 1]) for (let x = 0; x < fw; x++) for (let z = 0; z < 2; z++) vox.set(col(i + x), 0, z, c);
+    return { vox, h: 1 };
+  },
+  long(S, pal, col, mirror) {  // legs
+    const vox = new Vox(), F = Math.max(1, Math.round(S.w * 0.25));
+    for (const i of [F, mirror(F)]) {
+      for (let y = 1; y < 3; y++) vox.set(col(i), y, 0, pal.dark);
+      vox.set(col(i), 0, 0, pal.accent); vox.set(col(i), 0, 1, pal.accent);
     }
+    return { vox, h: 3 };
+  },
+  paws(S, pal, col, mirror) {
+    const vox = new Vox(), F = Math.max(0, Math.round(S.w * 0.14));
+    for (const [i, s] of [[F, 1], [mirror(F), -1]]) for (let x = 0; x < 3; x++) for (let z = 0; z < 2; z++) {
+      vox.set(col(i + x * s), 0, z, z === 1 && x !== 1 ? pal.belly : pal.dark);
+    }
+    return { vox, h: 1 };
+  },
+  many(S, pal, col, mirror) {  // a little row of feet, like a caterpillar
+    const vox = new Vox();
+    for (let i = 1; i < S.w / 2 - 0.5; i += 2) for (const j of [i, mirror(i)]) vox.set(col(j), 0, 0, pal.dark);
     return { vox, h: 1 };
   },
 };
 
 // Eyes: one drawing per expression, for the RIGHT eye. k = pupil, w = shine. Expressions listed in
-// `mirrored` are flipped for the left eye (slanted ones); the rest are drawn the same on both sides,
-// so the shine is on the same side of both eyes.
+// `mirrored` are flipped for the left eye (slanted ones); the rest are drawn the same on both sides, so
+// the shine is on the same side of both eyes. Missing expressions fall back to open.
 const EYES = {
-  round: {
-    w: 2, h: 2, mirrored: ['sad'],
-    open:  ['wk', 'kk'],
-    shut:  ['..', 'kk'],
-    happy: ['kk', '..'],
-    sad:   ['k.', '.k'],
-  },
+  round:   { w: 2, h: 2, mirrored: ['sad'], open: ['wk', 'kk'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
+  big:     { w: 3, h: 3, mirrored: ['sad'], open: ['wkk', 'kkk', 'kkk'], shut: ['...', '...', 'kkk'], happy: ['.k.', 'k.k', '...'], sad: ['k..', '.kk', '...'] },
+  sleepy:  { w: 2, h: 2, mirrored: ['sad'], open: ['..', 'kk'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
+  sharp:   { w: 2, h: 2, mirrored: ['open', 'sad'], open: ['k.', 'kk'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
+  tiny:    { w: 1, h: 1, mirrored: [], open: ['k'], shut: ['k'] },
+  wide:    { w: 3, h: 2, mirrored: ['sad'], open: ['wkk', 'kkk'], shut: ['...', 'kkk'], happy: ['kkk', '...'], sad: ['kk.', '..k'] },
+  dot:     { w: 1, h: 2, mirrored: [], open: ['k', 'k'], shut: ['.', 'k'], happy: ['k', '.'] },
+  sparkle: { w: 2, h: 2, mirrored: ['sad'], open: ['wk', 'kw'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
 };
 const EXPRESSIONS = ['open', 'shut', 'happy', 'sad'];
 
 // Mouths are painted onto the body's front surface. Offsets are [dx, dy] from the centre column(s)
 // at the mouth row: negative dx counts from the left centre column, positive from the right one.
+// k = dark, w = white (teeth). beak sticks out as a little part.
 const MOUTHS = {
-  dot: { k: [[0, 0]] },
+  dot:   { k: [[0, 0]] },
+  smile: { k: [[-1, 0], [0, -1], [1, 0]] },
+  cat:   { k: [[-2, 0], [-1, -1], [0, 0], [1, -1], [2, 0]] },
+  fangs: { k: [[0, 0]], w: [[-1, -1], [1, -1]] },
+  grin:  { k: [[-2, 0], [-1, -1], [0, -1], [1, -1], [2, 0]] },
+  beak:  { k: [], beak: true },
 };
 
-// How a recipe moves: bigger critters hop higher and further, and hold themselves up more firmly.
+// How a recipe moves: bigger critters hop higher and further and hold themselves up more firmly;
+// the body type, legs and wings adjust that.
 function motionFor(recipe) {
-  const { w, h } = recipe.body;
-  if (recipe.body.type === 'egg') return { upright: 40 };
-  return { hopV: 12 + 2.5 * h, hopS: 7 + w, upright: 20 * h - 30 };
+  const { w, h, type } = recipe.body;
+  if (type === 'egg') return { upright: 40 };
+  const B2 = BODIES[type] ?? BODIES.round, [mv, ms, mm] = B2.move;
+  const legs = recipe.feet?.type === 'long' ? 1.2 : 1;
+  return {
+    hopV: (12 + 2.5 * h) * mv * legs, hopS: (7 + w) * ms, upright: 20 * h - 30, mass: mm,
+    hover: !!B2.hover, glide: ['wings', 'bigwings'].includes(recipe.back?.type),
+  };
 }
 
 // An egg: round slices, widest a bit below the middle, with spots.
@@ -452,7 +698,7 @@ function buildCritter(recipe, pal) {
   const root = new THREE.Group();   // follows the physics body; origin at the feet
   const squash = new THREE.Group(); // squash & stretch, pivot at the feet
   root.add(squash);
-  const parts = { root, squash, ears: [], tail: null, eyes: [], S };
+  const parts = { root, squash, anim: [], eyes: [], S };
   parts.setExpr = (name) => {
     for (const e of parts.eyes) for (const [k, m] of Object.entries(e.m)) m.visible = k === (name in e.m ? name : 'open');
   };
@@ -464,12 +710,14 @@ function buildCritter(recipe, pal) {
 
   // Placement works in column indices 0..w-1 and mirrors i ↔ w-1-i, so faces stay symmetric for odd
   // and even widths. col(i) turns an index into the body's x coordinate.
-  const x0 = -Math.floor(S.w / 2), col = (i) => x0 + i, mirror = (i) => S.w - 1 - i;
+  const x0 = -Math.floor(S.w / 2), z0 = -Math.floor(S.d / 2);
+  const col = (i) => x0 + i, mirror = (i) => S.w - 1 - i;
   const bellyPaint = (nx, ny, nz) => (nz > 0.3 && ny < 0.25 && Math.abs(nx) < 0.62 ? pal.belly : pal.body);
   const body = blob(S.w, S.h, S.d, patternPainter(pal, bellyPaint), BODIES[RB.type] ?? BODIES.round);
 
-  const feet = recipe.feet && FEET[recipe.feet.type]?.(S, pal, col, mirror);
+  const feet = FEET[recipe.feet?.type ?? 'none']?.(S, pal, col, mirror);
   S.foot = feet ? feet.h : 0;
+  if (S.hover) S.foot = 0;
   if (feet) {
     const m = voxMesh(feet.vox, { layer: LAYER.part });
     m.position.set(S.w % 2 ? -0.5 : 0, 0, S.d % 2 ? -0.5 : 0);
@@ -479,18 +727,6 @@ function buildCritter(recipe, pal) {
   const bodyGroup = new THREE.Group();
   bodyGroup.position.set(S.w % 2 ? -0.5 : 0, S.foot, S.d % 2 ? -0.5 : 0);
   squash.add(bodyGroup);
-
-  // Puts a part's mesh on a socket. origin is the point in the part's own voxel space that should
-  // land on the socket; the returned group is the pivot that animation rotates.
-  const attach = (vox, socket, origin, layer = LAYER.part, opts = {}) => {
-    const g = new THREE.Group();
-    g.position.set(...socket);
-    const m = voxMesh(vox, { layer, ...opts });
-    m.position.set(-origin[0], -origin[1], -origin[2]);
-    g.add(m);
-    bodyGroup.add(g);
-    return g;
-  };
 
   // face
   const E = EYES[recipe.eyes] ?? EYES.round;
@@ -531,26 +767,303 @@ function buildCritter(recipe, pal) {
   }
   bodyGroup.add(voxMesh(body));
 
-  // ears, on the top surface, pivoting at their base
-  if (recipe.ears && EARS[recipe.ears.type]) {
-    const part = EARS[recipe.ears.type](recipe.ears, pal);
-    const ei = Math.max(1, Math.round(S.w * 0.2));
-    for (const [side, i] of [[-1, ei], [1, mirror(ei)]]) {
-      const top = body.topAt(col(i), 0) ?? S.h - 1;
-      const vox = side > 0 ? part.vox : mirrorVox(part.vox);
-      const g = attach(vox, [col(i) + 0.5, top + 0.6, 0.5], [side * 0.5, 0, 0.5]);
-      parts.ears.push({ g, side, motion: part.motion, a: 0, v: 0 });
-    }
+  // everything else plugs into the body
+  const k = { S, pal, body, col, mirror, x0, z0, cx: x0 + S.w / 2, zm: Math.floor(z0 + S.d / 2) };
+  const attachments = [];
+  if (M.beak) {
+    const bz = body.frontAt(col(cL), eyeY - 1) ?? 0, bc = 0xf2a33a;
+    attachments.push(...one(voxOf([[-1, 0], [0, 0], [-1, 0, 1], [0, 0, 1], [-1, -1], [0, -1]], bc), [k.cx, eyeY - 1, bz + 0.6], [0, 0, 0], 'stiff'));
   }
-
-  // tail, from the back of the body
-  if (recipe.tail && TAILS[recipe.tail.type]) {
-    const part = TAILS[recipe.tail.type](recipe.tail, pal);
-    const ty = Math.round(S.h * 0.3), bz = body.backAt(0, ty) ?? -S.d / 2;
-    const g = attach(part.vox, [0.5, ty + 0.5, bz + 0.6], [0.5, 0.5, 0.5]);
-    parts.tail = { g, motion: part.motion, a: 0, v: 0 };
+  const add = (table, p) => { if (p && table[p.type]) attachments.push(...table[p.type](k, p.len ?? 2)); };
+  add(HEADS, recipe.ears);
+  add(BACKS, recipe.back);
+  add(TAILS, recipe.tail);
+  for (const a of attachments) {
+    const g = new THREE.Group();
+    g.position.set(...a.at);
+    const m = voxMesh(a.vox, { layer: LAYER.part });
+    m.position.set(-a.origin[0], -a.origin[1], -a.origin[2]);
+    g.add(m);
+    bodyGroup.add(g);
+    if (a.motion !== 'none') parts.anim.push({ g, motion: a.motion, side: a.side, a: 0, v: 0, ph: Math.random() * 6 });
   }
   return parts;
+}
+
+// ---------------- palettes ----------------
+// Adults take on their element's colours; the seed still shifts the shades and picks the pattern.
+const ELEMENTS = ['fire', 'water', 'leaf', 'stone', 'crystal', 'shadow', 'candy', 'storm'];
+// hue range, saturation, lightness, accent hue offset, horn, antler, glow
+const ELEMENT_COLOURS = {
+  fire:    { h: [0.0, 0.05],  s: 0.75, l: 0.55, acc: 0.1,  horn: 0x3a2a2a, antler: 0x5a3a2a, glow: 0xffd23f },
+  water:   { h: [0.53, 0.6],  s: 0.6,  l: 0.6,  acc: -0.08, horn: 0xe8f4ff, antler: 0x6a8aa8, glow: 0x9ff3ff },
+  leaf:    { h: [0.25, 0.35], s: 0.5,  l: 0.55, acc: 0.65, horn: 0x8a6a3a, antler: 0x7a4a2a, glow: 0xd8ff7a },
+  stone:   { h: [0.06, 0.1],  s: 0.15, l: 0.55, acc: 0.0,  horn: 0x6a6460, antler: 0x7a6a5a, glow: 0xf2c14e },
+  crystal: { h: [0.5, 0.72],  s: 0.5,  l: 0.75, acc: 0.3,  horn: 0xffffff, antler: 0xd8e8ff, glow: 0x9fe8ff },
+  shadow:  { h: [0.72, 0.8],  s: 0.35, l: 0.32, acc: 0.12, horn: 0x1a1622, antler: 0x2a2236, glow: 0xd06bff },
+  candy:   { h: [0.9, 0.98],  s: 0.7,  l: 0.76, acc: 0.55, horn: 0xffffff, antler: 0xffb3d1, glow: 0xfff3a0 },
+  storm:   { h: [0.6, 0.66],  s: 0.3,  l: 0.5,  acc: 0.55, horn: 0xeeeeee, antler: 0x8a8aa0, glow: 0xfff36b },
+};
+const hslHex = (h, s, l) => new THREE.Color().setHSL(((h % 1) + 1) % 1, clamp(s, 0, 1), clamp(l, 0, 1), THREE.SRGBColorSpace).getHex(THREE.SRGBColorSpace);
+function elementPalette(element, seed) {
+  const E2 = ELEMENT_COLOURS[element], base = makePalette(seed), r = rngFrom(hashStr('el:' + seed));
+  const h = E2.h[0] + r() * (E2.h[1] - E2.h[0]), s = E2.s * (0.85 + r() * 0.3), l = E2.l * (0.92 + r() * 0.16);
+  return {
+    ...base, hue: h,
+    body: hslHex(h, s, l), belly: hslHex(h + 0.02, s * 0.6, Math.min(0.9, l + 0.25)),
+    accent: hslHex(h + E2.acc, Math.max(0.5, s), Math.max(0.45, Math.min(0.7, l + 0.05))),
+    dark: hslHex(h, s * 0.8, l * 0.6), horn: E2.horn, antler: E2.antler, glow: E2.glow,
+    wing: hslHex(h + 0.02, s * 0.5, Math.min(0.92, l + 0.3)),
+  };
+}
+// Colourings only rare forms get.
+const SPECIAL_PALETTES = {
+  gold:     { body: 0xf2c14e, belly: 0xfff1c9, accent: 0xff8a3d, dark: 0xa8741a, glow: 0xffffff, horn: 0xfff1c9 },
+  midnight: { body: 0x2b2a5a, belly: 0x5a5aa8, accent: 0xfff36b, dark: 0x16153a, glow: 0xa8f0ff, horn: 0xd8e8ff },
+  pumpkin:  { body: 0xf08a24, belly: 0xffc480, accent: 0x5cc04a, dark: 0x9a4a10, glow: 0xffd23f, horn: 0x5a3a2a },
+  snow:     { body: 0xf4f8ff, belly: 0xffffff, accent: 0x8ac8ff, dark: 0x9ab0c8, glow: 0xc8f0ff, horn: 0xd8e8ff },
+  love:     { body: 0xff8fb1, belly: 0xffd6e4, accent: 0xe0213f, dark: 0xb03a5e, glow: 0xffffff, horn: 0xffffff },
+  ghost:    { body: 0xe8eef8, belly: 0xffffff, accent: 0xb8a8ff, dark: 0x8a90b0, glow: 0xb8f0ff, horn: 0xffffff },
+  void:     { body: 0x1a1a22, belly: 0x2e2e3a, accent: 0x6af0c8, dark: 0x0e0e14, glow: 0x6af0c8, horn: 0x3a3a48 },
+  rainbow:  { body: 0xff8a8a, belly: 0xfff3a0, accent: 0x6ac8ff, dark: 0xb05ac8, glow: 0x8aff8a, horn: 0xffffff },
+  shiny:    null, // the pet's own colours, with a golden accent
+};
+function specialPalette(name, seed) {
+  const base = makePalette(seed);
+  if (name === 'shiny') return { ...base, accent: 0xffd23f, horn: 0xffd23f, glow: 0xfff3a0, wing: base.belly, antler: 0xffd23f };
+  const P = SPECIAL_PALETTES[name];
+  return { ...base, ...P, wing: P.belly, antler: P.horn, shell: P.belly };
+}
+// Fill in the part colours a seed palette doesn't have (for babies, children and teens).
+function withPartColours(p) {
+  return { horn: 0xf1e6cf, antler: 0x9a6a3a, glow: p.accent, wing: p.belly, leaf: 0x5cc04a, leafDark: 0x3a8a30, ...p };
+}
+
+// ---------------- forms ----------------
+// Teens: one per top trait. Each teen shows one signature part, and the adult always keeps it.
+const SIGNATURE = {
+  fed: ['tail', 'fluffy'], rested: ['ears', 'floppy'], playful: ['ears', 'long'], social: ['ears', 'antenna'],
+  hyped: ['back', 'spikes'], calm: ['back', 'shell'], nightowl: ['ears', 'horns'], generous: ['back', 'mane'],
+};
+// Bodies each trait leans toward, most likely first.
+const TRAIT_BODY = {
+  fed: ['chonky', 'blob', 'round'], rested: ['floaty', 'round', 'bean'], playful: ['tiny', 'long', 'round'],
+  social: ['round', 'bean', 'tall'], hyped: ['tall', 'tiny', 'long'], calm: ['blob', 'bean', 'floaty'],
+  nightowl: ['tall', 'floaty', 'bean'], generous: ['chonky', 'round', 'blob'],
+};
+// Part types each trait and each element tends to bring out.
+const TRAIT_LIKES = {
+  fed: ['fluffy', 'paws', 'club', 'smile', 'floppy', 'shell', 'tiny'],
+  rested: ['floppy', 'sleepy', 'mushroom', 'fluffy', 'none', 'wings', 'dot'],
+  playful: ['long', 'wings', 'fork', 'grin', 'sparkle', 'twin', 'tiny'],
+  social: ['antenna', 'big', 'smile', 'crown', 'mane', 'cat', 'wide'],
+  hyped: ['spikes', 'flame', 'sharp', 'grin', 'bigwings', 'fork', 'crest'],
+  calm: ['shell', 'sleepy', 'leaf', 'mushroom', 'dot', 'fin', 'nub'],
+  nightowl: ['horns', 'bigwings', 'sharp', 'antenna', 'crystals', 'fangs', 'wide'],
+  generous: ['mane', 'crown', 'fluffy', 'big', 'cat', 'crystals', 'paws'],
+};
+const ELEMENT_LIKES = {
+  fire: ['horns', 'spikes', 'flame', 'fork', 'sharp', 'fangs', 'crest'],
+  water: ['fins', 'sail', 'fin', 'wide', 'dot', 'nub', 'many'],
+  leaf: ['leaf', 'antlers', 'mushroom', 'sleepy', 'smile', 'floppy'],
+  stone: ['shell', 'horns', 'club', 'paws', 'tiny', 'crest', 'stub'],
+  crystal: ['crystals', 'crest', 'crown', 'sparkle', 'point', 'long'],
+  shadow: ['horns', 'bigwings', 'fork', 'sharp', 'fangs', 'antenna', 'twin'],
+  candy: ['mane', 'crown', 'fluffy', 'big', 'cat', 'sparkle', 'floppy'],
+  storm: ['antenna', 'wings', 'spikes', 'fork', 'sharp', 'grin', 'crest'],
+};
+const SMALL = ['none', 'nub', 'stub', 'wings', 'tiny', 'dot', 'stubby', 'point', 'curl'];
+const BIG = ['bigwings', 'shell', 'sail', 'mane', 'long', 'fluffy', 'club', 'twin', 'antlers', 'crown', 'mushroom'];
+const TOP_CENTRE = { ears: ['crest', 'mushroom', 'crown'], back: ['spikes', 'sail', 'flame', 'leaf', 'crystals'] };
+const SLOTS = { ears: Object.keys(HEADS), back: Object.keys(BACKS), tail: Object.keys(TAILS), feet: Object.keys(FEET) };
+const BANDS = ['slight', 'clear', 'extreme'];   // how far the top trait leads
+const FORMS_VERSION = 1;
+
+function teenRecipe(trait) {
+  const [slot, type] = SIGNATURE[trait], bt = TRAIT_BODY[trait][0], [w, h, d] = BODIES[bt].size;
+  const r = { body: { type: bt, w: Math.max(7, w - 2), h: Math.max(6, h - 1), d: Math.max(6, d - 1) },
+    ears: { type: 'nub', len: 2 }, tail: { type: 'curl', len: 2 }, feet: { type: bt === 'floaty' ? 'none' : 'stubby' },
+    eyes: 'round', mouth: 'dot' };
+  r[slot] = { type, len: 2 };
+  return r;
+}
+const TEENS = Object.fromEntries(TRAITS.map(t => [t, teenRecipe(t)]));
+
+// The adult table: 8 top traits × 7 second traits × 3 bands = 168 combos, each with 4 of the 8
+// elements, so 672 forms. It's built from a fixed seed and rules, in a fixed order, so it comes out
+// the same for everyone: the same kind of life gives the same form on any channel.
+let FORMS = null;
+function buildForms() {
+  if (FORMS) return FORMS;
+  const list = [], names = new Set();
+  for (const top of TRAITS) for (const second of TRAITS) {
+    if (second === top) continue;
+    for (const [bi, band] of BANDS.entries()) {
+      const rr = rngFrom(hashStr(`els:${top}:${second}:${band}`)), els = [...ELEMENTS];
+      for (let i = els.length - 1; i > 0; i--) { const j = Math.floor(rr() * (i + 1)); [els[i], els[j]] = [els[j], els[i]]; }
+      for (const element of els.slice(0, 4)) {
+        const recipe = makeForm(top, second, bi, element, list);
+        recipe.name = formName(recipe, element, names);
+        list.push({ id: 'f' + list.length, top, second, band, element, recipe });
+      }
+    }
+  }
+  FORMS = list;
+  return list;
+}
+
+function makeForm(top, second, bi, element, existing) {
+  for (let attempt = 0; ; attempt++) {
+    const r = rngFrom(hashStr(`form:${top}:${second}:${bi}:${element}:${attempt}:v${FORMS_VERSION}`));
+    const weight = (t) => {
+      let w = t === 'none' ? 0.6 : 1;
+      if (TRAIT_LIKES[top].includes(t)) w += 3;
+      if (TRAIT_LIKES[second].includes(t)) w += 2;
+      if (ELEMENT_LIKES[element].includes(t)) w += 3;
+      if (bi === 0) w *= SMALL.includes(t) ? 2 : BIG.includes(t) ? 0.5 : 1;
+      if (bi === 2) w *= BIG.includes(t) ? 2 : SMALL.includes(t) ? 0.4 : 1;
+      return w;
+    };
+    const pick = (opts) => {
+      const ws = opts.map(weight), tot = ws.reduce((a, b) => a + b, 0);
+      let x = r() * tot;
+      for (let i = 0; i < opts.length; i++) if ((x -= ws[i]) <= 0) return opts[i];
+      return opts[opts.length - 1];
+    };
+    // body: mostly the top trait's favourite, sometimes the second trait's
+    const bodies = [...TRAIT_BODY[top], TRAIT_BODY[second][0]], bw = [4, 2, 1, 1.5];
+    let x = r() * bw.reduce((a, b) => a + b, 0), bt = bodies[0];
+    for (let i = 0; i < bodies.length; i++) if ((x -= bw[i]) <= 0) { bt = bodies[i]; break; }
+    const sz = [0.92, 1, 1.08][bi], [w, h, d] = BODIES[bt].size;
+    const len = 1 + bi + (r() < 0.5 ? 1 : 0);
+    const recipe = { body: { type: bt, w: Math.round(w * sz), h: Math.round(h * sz), d: Math.round(d * sz) }, element };
+    const [sigSlot, sigType] = SIGNATURE[top];
+    for (const slot of ['ears', 'back', 'tail', 'feet']) {
+      let opts = SLOTS[slot];
+      if (slot === 'feet') opts = bt === 'floaty' ? ['none'] : opts.filter(t => t !== 'none');
+      if (slot === 'back' && bt === 'long') opts = opts.filter(t => t !== 'bigwings');
+      if (slot === 'back' && TOP_CENTRE.ears.includes(recipe.ears?.type)) opts = opts.filter(t => !TOP_CENTRE.back.includes(t));
+      if (slot === 'tail' && BIG.includes(recipe.back?.type)) opts = opts.filter(t => !BIG.includes(t));
+      const type = slot === sigSlot ? sigType : pick(opts);
+      recipe[slot] = { type, len };
+    }
+    recipe.eyes = pick(Object.keys(EYES));
+    recipe.mouth = pick(Object.keys(MOUTHS));
+    // the signature may have been placed after a clashing pick; fix the clash, not the signature
+    if (TOP_CENTRE.ears.includes(recipe.ears.type) && TOP_CENTRE.back.includes(recipe.back.type)) {
+      if (sigSlot === 'back') recipe.ears.type = 'point'; else recipe.back.type = 'none';
+    }
+    if (BIG.includes(recipe.back.type) && BIG.includes(recipe.tail.type)) recipe.tail.type = sigSlot === 'tail' ? recipe.tail.type : 'curl';
+    // silhouette check: differ from every same-body, same-element form in at least two big parts
+    const close = existing.some(f => f.recipe.body.type === bt && f.element === element &&
+      ['ears', 'back', 'tail'].filter(s => f.recipe[s].type !== recipe[s].type).length < 2);
+    if (!close || attempt > 40) return recipe;
+  }
+}
+
+const NAME_PREFIX = {
+  fire: ['Ember', 'Blaze', 'Cinder', 'Scorch', 'Flick', 'Sizzle'], water: ['Drip', 'Tide', 'Ripple', 'Splash', 'Puddle', 'Brook'],
+  leaf: ['Moss', 'Sprout', 'Fern', 'Bud', 'Clover', 'Thistle'], stone: ['Pebble', 'Crag', 'Grit', 'Boulder', 'Flint', 'Rubble'],
+  crystal: ['Prism', 'Glint', 'Shard', 'Frost', 'Gleam', 'Quartz'], shadow: ['Gloom', 'Shade', 'Murk', 'Dusk', 'Hush', 'Umbra'],
+  candy: ['Sugar', 'Fizz', 'Gummy', 'Taffy', 'Sprinkle', 'Fudge'], storm: ['Zap', 'Gust', 'Volt', 'Thunder', 'Squall', 'Static'],
+};
+const NAME_SUFFIX = {
+  floppy: ['flop', 'lop'], long: ['hop', 'ears'], antenna: ['bop', 'beep'], horns: ['horn', 'butt'], antlers: ['stag', 'tine'],
+  fins: ['fin', 'gill'], crest: ['crest', 'comb'], mushroom: ['cap', 'shroom'], crown: ['king', 'crown'], point: ['tip', 'kit'],
+  wings: ['wing', 'flap'], bigwings: ['drake', 'glide'], spikes: ['spike', 'prick'], shell: ['shell', 'dome'],
+  mane: ['mane', 'ruff'], leaf: ['leaf', 'frond'], crystals: ['gem', 'spire'], sail: ['sail', 'back'], flame: ['flare', 'wick'],
+  fluffy: ['puff', 'floof'], club: ['club', 'thud'], fork: ['fork', 'imp'], fin: ['swish', 'flip'], twin: ['twin', 'whip'],
+  chonky: ['chonk', 'bun'], blob: ['gloop', 'blob'], floaty: ['float', 'wisp'], tiny: ['nib', 'pip'], tall: ['stalk', 'loom'],
+  bean: ['bean', 'pod'], round: ['ball', 'bun'], long_body: ['noodle', 'loaf'],
+};
+// Element + the form's most striking part, unique across the table.
+function formName(recipe, element, used) {
+  const keys = [recipe.back.type, recipe.ears.type, recipe.tail.type, recipe.body.type === 'long' ? 'long_body' : recipe.body.type]
+    .filter(k => k !== 'none' && NAME_SUFFIX[k]);
+  const r = rngFrom(hashStr('name:' + JSON.stringify(recipe))), pre = [...NAME_PREFIX[element]];
+  for (let i = pre.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [pre[i], pre[j]] = [pre[j], pre[i]]; }
+  for (const key of keys) for (const suf of NAME_SUFFIX[key]) for (const p of pre) {
+    const n = p + suf;
+    if (!used.has(n)) { used.add(n); return n; }
+  }
+  for (let i = 2; ; i++) { const n = pre[0] + (NAME_SUFFIX[keys[0]]?.[0] ?? 'kin') + 'o'.repeat(i - 1); if (!used.has(n)) { used.add(n); return n; } }
+}
+
+// Rare forms: hand-made, for unusual lives. Checked in order before the table; the first match wins.
+const R = (body, ears, back, tail, feet, eyes, mouth, pal, len = 3) => {
+  const [w, h, d] = BODIES[body].size;
+  return { body: { type: body, w, h, d }, ears: { type: ears, len }, back: { type: back, len }, tail: { type: tail, len },
+    feet: { type: body === 'floaty' ? 'none' : feet }, eyes, mouth, special: pal };
+};
+const share = (s, t) => s.traits[t] / Math.max(1e-6, TRAITS.reduce((a, k) => a + s.traits[k], 0));
+const RARE = [
+  { name: 'Goldheart',   when: s => s.events.subs >= 50 || share(s, 'generous') > 0.35, recipe: R('round', 'crown', 'mane', 'fluffy', 'paws', 'sparkle', 'cat', 'gold') },
+  { name: 'Stormcaller', when: s => s.events.raids >= 10, recipe: R('tall', 'horns', 'bigwings', 'fork', 'long', 'sharp', 'grin', 'midnight') },
+  { name: 'Partyfloof',  when: s => s.events.chatters >= 500, recipe: R('round', 'antenna', 'mane', 'fluffy', 'stubby', 'sparkle', 'grin', 'rainbow') },
+  { name: 'Raidhatch',   when: s => s.flags?.raidHatch, recipe: R('tiny', 'crest', 'wings', 'twin', 'long', 'big', 'grin', 'midnight') },
+  { name: 'Moonwisp',    when: s => share(s, 'nightowl') > 0.6, recipe: R('floaty', 'antenna', 'none', 'long', 'none', 'sparkle', 'dot', 'midnight') },
+  { name: 'Pumpkid',     when: s => s.hatchMonth === 9 && s.hatchDay >= 24, recipe: R('round', 'none', 'leaf', 'stub', 'stubby', 'sharp', 'grin', 'pumpkin') },
+  { name: 'Snowpuff',    when: s => ((s.hatchMonth === 11 && s.hatchDay >= 20) || (s.hatchMonth === 0 && s.hatchDay <= 6)) && share(s, 'calm') > 0.2, recipe: R('chonky', 'nub', 'mane', 'fluffy', 'paws', 'round', 'smile', 'snow') },
+  { name: 'Lovebug',     when: s => s.hatchMonth === 1 && s.hatchDay >= 10 && s.hatchDay <= 16 && share(s, 'social') > 0.2, recipe: R('bean', 'antenna', 'wings', 'stub', 'stubby', 'big', 'cat', 'love') },
+  { name: 'Old Moss',    when: s => s.gen % 5 === 0, recipe: R('blob', 'antlers', 'shell', 'leaf', 'paws', 'sleepy', 'smile', 'shiny') },
+  { name: 'Ghostlet',    when: s => s.flags?.wasSick, recipe: R('floaty', 'none', 'none', 'long', 'none', 'big', 'dot', 'ghost') },
+  { name: 'Dozezilla',   when: s => share(s, 'rested') > 0.6, recipe: R('blob', 'floppy', 'spikes', 'club', 'paws', 'sleepy', 'fangs', 'shiny') },
+  { name: 'Zoomerang',   when: s => share(s, 'playful') > 0.6, recipe: R('tiny', 'long', 'wings', 'long', 'long', 'sparkle', 'grin', 'shiny') },
+  { name: 'Gobblet',     when: s => share(s, 'fed') > 0.65, recipe: R('chonky', 'nub', 'none', 'fluffy', 'paws', 'tiny', 'smile', 'pumpkin') },
+  { name: 'Voidling',    when: s => share(s, 'calm') > 0.75 && makePalette(s.seed).pattern === 'none', recipe: R('bean', 'horns', 'crystals', 'fork', 'stubby', 'dot', 'dot', 'void') },
+  { name: 'Prismkin',    when: s => TRAITS.every(t => Math.abs(share(s, t) - 1 / 8) < 0.03), recipe: R('round', 'crest', 'crystals', 'twin', 'stubby', 'sparkle', 'smile', 'rainbow') },
+  { name: 'Witchling',   when: s => s.hatchHour === 0 && share(s, 'nightowl') > 0.3, recipe: R('tall', 'horns', 'wings', 'fork', 'long', 'sharp', 'fangs', 'void') },
+  { name: 'Hypernova',   when: s => share(s, 'hyped') > 0.6, recipe: R('tall', 'crest', 'flame', 'fork', 'long', 'wide', 'grin', 'gold') },
+  { name: 'Chatterbox',  when: s => share(s, 'social') > 0.6, recipe: R('round', 'antenna', 'none', 'curl', 'stubby', 'big', 'grin', 'love') },
+  { name: 'Mooncalf',    when: s => s.tod[0] / Math.max(1e-6, s.tod.reduce((a, b) => a + b, 0)) > 0.8, recipe: R('chonky', 'horns', 'none', 'stub', 'paws', 'sleepy', 'dot', 'midnight') },
+  { name: 'Shinyling',   when: s => hashStr('shiny:' + s.seed) % 400 === 0, recipe: R('round', 'point', 'wings', 'curl', 'stubby', 'sparkle', 'cat', 'shiny') },
+];
+RARE.forEach((f, i) => { f.id = 'r' + i; f.recipe.name = f.name; });
+
+// Which way a pet's element leans, from when and how it lived.
+function elementScores(s) {
+  const sc = Object.fromEntries(ELEMENTS.map(e => [e, 0]));
+  const tot = s.tod.reduce((a, b) => a + b, 0) || 1;
+  [['shadow', 'crystal'], ['leaf', 'water'], ['fire', 'stone'], ['candy', 'storm']].forEach(([a, b], i) => {
+    sc[a] += 2 * s.tod[i] / tot; sc[b] += s.tod[i] / tot;
+  });
+  const season = s.hatchMonth == null ? -1 : [3, 3, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3][s.hatchMonth];
+  if (season >= 0) {
+    const [a, b] = [['leaf', 'candy'], ['fire', 'storm'], ['stone', 'shadow'], ['crystal', 'water']][season];
+    sc[a] += 1; sc[b] += 0.5;
+  }
+  sc.storm += Math.min(1, (s.events.raids ?? 0) * 0.3);
+  sc.candy += Math.min(1, ((s.events.subs ?? 0) + (s.events.bits ?? 0) / 500) * 0.1);
+  sc.water += Math.min(0.6, (s.events.chat ?? 0) / 5000);
+  const r = rngFrom(hashStr('elem:' + s.seed));
+  for (const e of ELEMENTS) sc[e] += r() * 0.3;
+  return sc;
+}
+function traitRanking(s) {
+  const tot = TRAITS.reduce((a, k) => a + s.traits[k], 0) || 1;
+  const r = rngFrom(hashStr('tie:' + s.seed));
+  return TRAITS.map(t => [t, s.traits[t] / tot + r() * 1e-6]).sort((a, b) => b[1] - a[1]);
+}
+function chooseTeen() { return { ...TEENS[traitRanking(save)[0][0]] }; }
+function chooseAdult() {
+  const rare = RARE.find(f => { try { return f.when(save); } catch (e) { return false; } });
+  if (rare) return { recipe: structuredClone(rare.recipe), name: rare.name };
+  const rank = traitRanking(save), [top, a] = rank[0], [, b] = rank[1];
+  const lead = a - b, band = lead < 0.08 ? 'slight' : lead < 0.25 ? 'clear' : 'extreme';
+  // the teen's signature is fixed: stick with the teen's trait as "top" even if another caught up
+  const teenTop = Object.keys(TEENS).find(t => JSON.stringify(TEENS[t]) === JSON.stringify(save.teen)) ?? top;
+  const second = teenTop === top ? rank[1][0] : top;
+  const options = buildForms().filter(f => f.top === teenTop && f.second === second && f.band === band);
+  const sc = elementScores(save);
+  const f = options.sort((x, y) => sc[y.element] - sc[x.element])[0];
+  return { recipe: structuredClone(f.recipe), name: f.recipe.name };
+}
+// Look a form up by id: t-<trait>, r<n> or f<n>.
+function formById(id) {
+  if (/^t-/.test(id) && TEENS[id.slice(2)]) return { recipe: TEENS[id.slice(2)], name: 'teen ' + id.slice(2), stage: 'teen' };
+  if (/^r\d+$/.test(id) && RARE[+id.slice(1)]) return { recipe: RARE[+id.slice(1)].recipe, name: RARE[+id.slice(1)].name, stage: 'adult' };
+  const f = buildForms()[+id.slice(1)];
+  return f && /^f\d+$/.test(id) ? { recipe: f.recipe, name: f.recipe.name, stage: 'adult' } : null;
 }
 
 // ---------------- renderer / scene ----------------
@@ -593,6 +1106,77 @@ function placeShadow(m, x, w, height) {
   m.position.set(x, 0, 0);
   m.scale.set(w * 1.25 * k, 2.2 * k, 1);
   m.material.opacity = 0.32 * k;
+}
+
+
+// the current pet's colours (changes when it evolves or a new generation hatches)
+let pal = palFor(save);
+
+// ---------------- gallery (?gallery=1) ----------------
+// Every form on a grid, a page at a time, for reviewing them: name and the life that leads to it under
+// each. ← / → or ?page= to flip pages, click one to try it as a pet. For development; it spoils the
+// surprise.
+function galleryPalette(recipe, seed = 'gallery') {
+  return withPartColours(recipe.special ? specialPalette(recipe.special, seed)
+    : recipe.element ? elementPalette(recipe.element, seed) : makePalette(seed));
+}
+function runGallery() {
+  document.body.classList.add('gallery');
+  const all = [
+    ...Object.entries(TEENS).map(([t, r]) => ({ id: 't-' + t, recipe: r, name: 'teen', info: t })),
+    ...RARE.map(f => ({ id: f.id, recipe: f.recipe, name: f.name, info: 'rare' })),
+    ...buildForms().map(f => ({ id: f.id, recipe: f.recipe, name: f.recipe.name, info: `${f.top}·${f.second}·${f.band}·${f.element}` })),
+  ];
+  const COLS = 8, ROWS = 5, per = COLS * ROWS, pages = Math.ceil(all.length / per);
+  const page = clamp(parseInt(Q.get('page')) || 0, 0, pages - 1);
+  const W = innerWidth, H = innerHeight;
+  renderer.setSize(W, H);
+  renderer.setClearColor(0x2a1f44, 1);
+  // each cell is 24 voxels square, room for tall ears and the label
+  const CELL = 24, cellPx = Math.min(W / COLS, (H - 40) / ROWS), px = cellPx / CELL;
+  const gcam = new THREE.OrthographicCamera(0, W / px, 0, -H / px, 1, 1000);
+  gcam.position.set(0, 0, 300);
+  scene.rotation.x = 0;
+  const items = [];
+  all.slice(page * per, page * per + per).forEach((it, i) => {
+    const cx = (i % COLS + 0.5) * CELL + (W / px - COLS * CELL) / 2, base = -(Math.floor(i / COLS) + 1) * CELL + 5 - 40 / px;
+    const parts = buildCritter(it.recipe, galleryPalette(it.recipe));
+    parts.root.position.set(cx, base + 1, 0);
+    parts.root.rotation.x = PITCH;
+    scene.add(parts.root);
+    items.push({ parts, ph: i });
+    const lab = document.createElement('a');
+    lab.className = 'glabel';
+    lab.href = `?form=${it.id}&debug=1`;
+    lab.innerHTML = `<b></b><span></span>`;
+    lab.querySelector('b').textContent = it.name;
+    lab.querySelector('span').textContent = `${it.id} · ${it.info}`;
+    lab.style.left = cx * px + 'px';
+    lab.style.top = (-base + 1.2) * px + 'px';
+    document.body.appendChild(lab);
+  });
+  const head = document.createElement('div');
+  head.className = 'ghead';
+  head.textContent = `${all.length} forms — page ${page + 1} / ${pages}   (← / → to flip)`;
+  document.body.appendChild(head);
+  addEventListener('keydown', (e) => {
+    const p = e.key === 'ArrowRight' ? page + 1 : e.key === 'ArrowLeft' ? page - 1 : null;
+    if (p !== null && p >= 0 && p < pages) { Q.set('page', p); location.search = Q.toString(); }
+  });
+  const loop = (t) => {
+    requestAnimationFrame(loop);
+    for (const it of items) {
+      it.parts.squash.rotation.y = Math.sin(t / 900 + it.ph) * 0.5;
+      for (const a of it.parts.anim) if (a.motion === 'flicker') a.g.scale.y = 1 + Math.sin(t / 60 + a.ph) * 0.12;
+    }
+    renderer.render(scene, gcam);
+  };
+  requestAnimationFrame(loop);
+}
+
+if (Q.get('gallery') === '1') {
+  runGallery();
+  await new Promise(() => {}); // the gallery is all this page does; stop here
 }
 
 // ---------------- physics world ----------------
@@ -639,10 +1223,13 @@ addEventListener('resize', layout);
 const screenTop = () => (innerHeight - CFG.ground) / PX - 0.6;
 
 // ---------------- the pet ----------------
-let pal = palFor(save);
 const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3();
 // bodies only rotate about z (in the screen plane), so this is the whole rotation
 const rollOf = (q) => wrapAngle(2 * Math.atan2(q.z, q.w));
+
+// spring stiffness, damping, how much hops move it, max angle, for each kind of part motion
+const SPRINGS = { loose: [180, 10, 1, 0.9], stiff: [600, 30, 0.25, 0.25], tail: [120, 6, 0.8, 1], wing: [0], flicker: [0] };
+const HOVER = 2.5; // how high floaty bodies hover, in voxels
 
 class Pet {
   constructor(recipe, label, x = 0) { this.build(recipe, label, x, 30); }
@@ -661,7 +1248,7 @@ class Pet {
       .setTranslation(x, y, 0).enabledTranslations(true, true, false).enabledRotations(false, false, true)
       .setAngularDamping(1.5).setCcdEnabled(true));
     world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
-      .setDensity(1).setFriction(0.9).setRestitution(0.05)
+      .setDensity(S.mass ?? 1).setFriction(0.9).setRestitution(0.05)
       .setCollisionGroups(groups(G.PET, G.WORLD | G.WALL | G.PROP)), this.body);
     this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
     this.action = null; this.rethink = 0; this.scores = {}; this.cool = {}; this.timer = rand(0.5, 1.5);
@@ -683,7 +1270,7 @@ class Pet {
     const p = this.pos(), v = this.body.linvel(), tilt = Math.abs(this.roll);
     let hit = false;
     for (const o of [-0.8, 0, 0.8]) {
-      const reach = this.hy + 0.35 + Math.abs(o) * this.hx * Math.sin(tilt) + (o ? 0.3 : 0);
+      const reach = this.hy + 0.35 + Math.abs(o) * this.hx * Math.sin(tilt) + (o ? 0.3 : 0) + (this.S.hover ? HOVER + 1 : 0);
       if (world.castRay(new RAPIER.Ray({ x: p.x + o * this.hx, y: p.y, z: 0 }, { x: 0, y: -1, z: 0 }), reach, true,
         undefined, groups(G.PET, G.WORLD | G.PROP), undefined, this.body)) { hit = true; break; }
     }
@@ -712,6 +1299,22 @@ class Pet {
     if (this.dazed > 0) {
       this.dazed -= dt;
       if (this.dazed <= 0 && this.grounded) b.applyImpulse({ x: 0, y: b.mass() * 18, z: 0 }, true); // scramble up
+    }
+
+    // floaty bodies hover a little way up on a spring instead of standing
+    if (S.hover) {
+      const hit = world.castRay(new RAPIER.Ray(p, { x: 0, y: -1, z: 0 }), 30, true, undefined,
+        groups(G.PET, G.WORLD | G.PROP), undefined, b);
+      const gap = hit ? hit.timeOfImpact - this.hy : 30;
+      if (gap < HOVER + 3) {
+        const m = b.mass(), bob = Math.sin(performance.now() / 600) * 0.4;
+        b.applyImpulse({ x: 0, y: m * dt * (GRAVITY + 60 * (HOVER + bob - gap) - 8 * v.y), z: 0 }, true);
+      }
+    }
+    // wings: glide down gently
+    if (S.glide) {
+      const g = !this.grounded && v.y < 0 ? 0.4 : 1;
+      if (b.gravityScale() !== g) b.setGravityScale(g, true);
     }
 
     // stay upright
@@ -785,24 +1388,32 @@ class Pet {
       // squash & stretch
       this.sqV += ((target - this.sq) * 260 - this.sqV * 14) * h;
       this.sq = clamp(this.sq + this.sqV * h, -0.4, 0.35);
-      // ears and tail lag behind the body, all in the screen plane
-      for (const e of V.ears) {
-        e.v += (-e.a * 180 - e.v * 10 + ay * 0.004 * -e.side + ax * 0.003) * h;
-        e.a = clamp(e.a + e.v * h, -0.9, 0.9);
-      }
-      if (V.tail) {
-        const t = V.tail;
-        t.v += (-t.a * 120 - t.v * 6 + ay * 0.003) * h;
-        t.a = clamp(t.a + t.v * h, -1, 1);
+      // ears, tails and other loose parts lag behind the body, all in the screen plane
+      for (const e of V.anim) {
+        const [k, c, gain, lim] = SPRINGS[e.motion] ?? SPRINGS.loose;
+        if (!k) continue;
+        e.v += (-e.a * k - e.v * c + (ay * 0.004 * -(e.side || 1) + ax * 0.003) * gain) * h;
+        e.a = clamp(e.a + e.v * h, -lim, lim);
       }
     }
     V.squash.rotation.y = this.yaw + this.spin;
     const sy = 1 + this.sq, sxz = 1 / Math.sqrt(sy);
     V.squash.scale.set(sxz, sy, sxz);
-    for (const e of V.ears) e.g.rotation.z = e.a;
-    if (V.tail) {
-      V.tail.g.rotation.x = V.tail.a;
-      V.tail.g.rotation.y = Math.sin(performance.now() / 260) * 0.35; // wag
+    const now = performance.now();
+    for (const e of V.anim) {
+      if (e.motion === 'flicker') { e.g.scale.y = 1 + Math.sin(now / 60 + e.ph) * 0.1 + Math.sin(now / 37 + e.ph) * 0.06; continue; }
+      if (e.motion === 'wing') {
+        e.g.rotation.z = e.side * (this.grounded ? Math.sin(now / 500 + e.ph) * 0.08 : Math.sin(now / 45) * 0.55);
+        continue;
+      }
+      // tails wag up and down in the screen plane, and a single tail trails behind the way it faces,
+      // swinging across when it turns
+      e.g.rotation.z = e.a + (e.motion === 'tail' ? Math.sin(now / 260) * 0.22 * (e.side || 1) : 0);
+      if (e.motion === 'tail' && e.side === 1) {
+        if (this.facing) e.trail = -this.facing;
+        e.flip = (e.flip ?? 1) + ((e.trail ?? 1) - (e.flip ?? 1)) * Math.min(1, dt * 9);
+        e.g.scale.x = Math.abs(e.flip) < 0.05 ? 0.05 * Math.sign(e.flip || 1) : e.flip;
+      }
     }
 
     // blink
@@ -1041,6 +1652,7 @@ function tickLife(dt) {
   // about mood, and chat is the only thing that fills it, so it never makes the pet ill.)
   const low = N.hunger < 12 || N.energy < 12 || N.hygiene < 12;
   life.health = clamp(life.health + (low ? -25 : 6) * h, 0, 100);
+  if (life.health < 20) (save.flags ??= {}).wasSick = true;
 }
 
 // Night hours (local time) make it want to sleep. ?night=1-7 by default, ?night=off to never.
@@ -1282,13 +1894,12 @@ function recipeFor(stage) {
   if (stage === 'adult' || stage === 'elder') return save.form ?? STAGES.adult;
   return STAGES[stage];
 }
-// Placeholders until the form generator: one teen and one adult form.
-function chooseTeen() { return STAGES.teen; }
-function chooseAdult() { return { recipe: STAGES.adult, name: 'Critter' }; }
 
 // Elders go a little grey.
 function palFor(s) {
-  const p = makePalette(s.seed, s.hue);
+  const f = s.stage === 'adult' || s.stage === 'elder' ? s.form : null;
+  const p = withPartColours(f?.special ? specialPalette(f.special, s.seed)
+    : f?.element ? elementPalette(f.element, s.seed) : makePalette(s.seed, s.hue));
   if (s.stage !== 'elder') return p;
   const grey = (hex) => {
     const c = new THREE.Color().setHex(hex, THREE.SRGBColorSpace), hsl = {};
@@ -1303,9 +1914,15 @@ function palFor(s) {
 function makeName(seed) {
   const r = rngFrom(hashStr('name:' + seed)), pick = (a) => a[Math.floor(r() * a.length)];
   const A = ['Bo', 'Mi', 'Pip', 'Lu', 'Ka', 'Zu', 'Nim', 'Fi', 'To', 'Ra', 'Po', 'Chi', 'Mo', 'Bea', 'Dot', 'Wix', 'Pa', 'Nu', 'Ki', 'Sa', 'Gum', 'Tib'];
-  const Bs = ['bo', 'mi', 'pi', 'lu', 'ka', 'zu', 'ni', 'fi', 'to', 'chi', 'mo', 'ri', 'pu', 'do', 'ki', 'sy'];
+  // (no 'ka' in the middle: it spells a couple of unkind words with the starts above)
+  const Bs = ['bo', 'mi', 'pi', 'lu', 'zu', 'ni', 'fi', 'to', 'chi', 'mo', 'ri', 'pu', 'do', 'ki', 'sy'];
   const E = ['', '', '', 'n', 'bit', 'ble', 'kin', 'p', 'o', 'y'];
-  return pick(A) + (r() < 0.7 ? pick(Bs) : '') + pick(E);
+  // a couple of other pairs that spell something unkind
+  const AVOID = ['Pa|ki', 'Po||o'];
+  for (;;) {
+    const a = pick(A), b = r() < 0.7 ? pick(Bs) : '', e = pick(E);
+    if (!AVOID.some(x => (a + '|' + b + '|' + e).startsWith(x))) return a + b + e;
+  }
 }
 
 // Traits build up from how its life is going, an hour at a time. Chat and stream events add to them
@@ -1315,11 +1932,11 @@ function tickAge(dt) {
   save.age += h * 3600;
   if (save.stage !== 'egg') {
     const T = save.traits, act = pet.action?.name, hour = new Date().getHours();
-    if (N.hunger > 60) T.fed += h;
+    T.fed += h * 0.6 * clamp((N.hunger - 55) / 45, 0, 1); // more the fuller it's kept
     if (pet.asleep) T.rested += isNight() ? 2 * h : h;
     if (act === 'play' || act === 'zoomies') T.playful += 3 * h;
     if (N.social > 60) T.social += h;
-    if (save.t - (life.lastChat ?? -1e9) > 300 * CFG.speed) T.calm += h;
+    if (save.t - (life.lastChat ?? -1e9) > 300 * CFG.speed) T.calm += h * 0.5; // quiet stretches
     if (hour >= 22 || hour < 4) T.nightowl += h;
     save.tod[Math.floor(hour / 6)] += h;
   }
@@ -1330,7 +1947,11 @@ function tickAge(dt) {
 let cutscene = null;
 function evolve(next) {
   const from = save.stage;
-  if (next === 'baby') { save.hatchMonth = new Date().getMonth(); save.name ??= CFG.name || makeName(save.seed); }
+  if (next === 'baby') {
+    const now = new Date();
+    save.hatchMonth = now.getMonth(); save.hatchDay = now.getDate(); save.hatchHour = now.getHours();
+    save.name ??= CFG.name || makeName(save.seed);
+  }
   if (next === 'teen') save.teen = chooseTeen();
   if (next === 'adult') { const f = chooseAdult(); save.form = f.recipe; save.formName = f.name; }
   save.stage = next;
@@ -1385,7 +2006,7 @@ ACTIONS.retire = {
   step(p, dt, a) {
     const q = p.pos();
     if (a.t < 2.5) {                       // wave
-      for (const e of p.vis.ears) e.v += Math.sin(a.t * 14) * 40 * dt * e.side;
+      for (const e of p.vis.anim) if (e.motion === 'loose') e.v += Math.sin(a.t * 14) * 40 * dt * (e.side || 1);
       return false;
     }
     if (!a.egg) {                           // lay the egg
@@ -1406,7 +2027,7 @@ ACTIONS.retire = {
     p.hopToward(a.exit, 2, dt);
     if (Math.abs(q.x - a.exit) > 12) return false;
     // gone: the egg becomes the new pet
-    save.lineage.push({ name: save.name, form: save.formName, gen: save.gen, born: save.born, retired: Date.now() });
+    a.child.lineage.push({ name: save.name, form: save.formName, gen: save.gen, born: save.born, retired: Date.now() });
     const ex = a.egg.pos().x;
     a.egg.remove();
     replaceSave(a.child);
@@ -1514,6 +2135,10 @@ function floatText(x, y, text, cls) {
 }
 
 // ---------------- loop ----------------
+if (save.formId) {
+  const f = formById(save.formId);
+  if (f) { save.stage = f.stage; save[f.stage === 'teen' ? 'teen' : 'form'] = f.recipe; save.formName = f.name; pal = palFor(save); }
+}
 let pet = new Pet(recipeFor(save.stage), save.stage, (B.left + B.right) / 2);
 placeBed(B.left + 14);
 if (!TESTING) {
@@ -1598,6 +2223,7 @@ function frame(now) {
       `needs ${Object.entries(N).map(([k, v]) => k + ' ' + v.toFixed(0)).join('  ')}  health ${life.health.toFixed(0)}\n` +
       `wants ${Object.entries(pet.scores).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + v.toFixed(2)).join('  ')}\n` +
       `traits ${TRAITS.map(k => k + ' ' + save.traits[k].toFixed(1)).join('  ')}\n` +
+      (save.lineage.length ? `family ${save.lineage.map(l => `${l.name} (${l.form ?? '?'})`).join(' → ')}\n` : '') +
       `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
   }
   renderer.render(scene, cam);
