@@ -15,8 +15,8 @@
     xmin/xmax left/right walls in % of the width (default 0/100)
     seed      look of the pet (colours, pattern); random if not given
     stage     egg, baby, child or adult (default baby, until the life cycle exists)
-    quality   high or low (default: high, low on software rendering; low drops the outlines)
     ball      1 = drop a ball in to play with
+    drop      things to drop in at the start, for testing: drop=apple,fish,cookie,cake,poop,ball
     debug     1 = collider wireframes + a status readout
     settle    seconds of simulation to run before the first frame (for screenshots)
 
@@ -57,7 +57,6 @@ const CFG = {
   xmax: num('xmax', 100, 0, 100),
   seed: Q.get('seed') || String(Math.floor(Math.random() * 1e9)),
   stage: ['egg', 'baby', 'child', 'adult'].includes(Q.get('stage')) ? Q.get('stage') : 'baby',
-  quality: Q.get('quality'),
   ball: Q.get('ball') === '1',
   debug: Q.get('debug') === '1',
 };
@@ -164,7 +163,7 @@ function meshVox(vox) {
     const a = [k & 3, (k >> 2) & 3, (k >> 4) & 3, (k >> 6) & 3];
     // Grow each quad a hair past its edges. At a step, the near face and the face behind it meet on
     // the same screen edge without sharing vertices, and pixels along that edge would otherwise fall
-    // through to the ink hull behind (flickering dark lines).
+    // through to whatever is behind (flickering hairline cracks).
     const e = 0.012;
     const corners = [[u0 - e, v0 - e], [u0 + w + e, v0 - e], [u0 + w + e, v0 + h + e], [u0 - e, v0 + h + e]];
     for (let n = 0; n < 4; n++) {
@@ -198,29 +197,8 @@ const LAYER = { body: 0, part: 1, face: 2 };
 const VOX_MATS = [0, 1, 2].map(l => new THREE.MeshLambertMaterial({
   vertexColors: true, polygonOffset: l > 0, polygonOffsetFactor: -l, polygonOffsetUnits: -4 * l,
 }));
-const INK_MAT = new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.BackSide });
-// Push the hull ~2 voxels away from the camera so it only shows around the silhouette, not through
-// the stair-steps of the voxel surface.
-INK_MAT.onBeforeCompile = (sh) => {
-  sh.vertexShader = sh.vertexShader.replace('#include <project_vertex>',
-    '#include <project_vertex>\n  gl_Position.z += 0.004 * gl_Position.w;');
-};
-const INK = 0.28; // outline thickness in voxels
-
-// A mesh for a voxel grid, with an inverted-hull ink outline like the comic overlays.
-// Low quality (software rendering) skips the outlines, which halves the draw work.
-function voxMesh(vox, { ink = !lowQuality, layer = LAYER.body } = {}) {
-  const geo = meshVox(vox);
-  const mesh = new THREE.Mesh(geo, VOX_MATS[layer]);
-  if (ink) {
-    const b = geo.boundingBox, c = new THREE.Vector3(), s = new THREE.Vector3();
-    b.getCenter(c); b.getSize(s);
-    const hull = new THREE.Mesh(geo, INK_MAT);
-    hull.scale.set((s.x + 2 * INK) / s.x, (s.y + 2 * INK) / s.y, (s.z + 2 * INK) / s.z);
-    hull.position.copy(c).multiply(new THREE.Vector3(1, 1, 1).sub(hull.scale));
-    mesh.add(hull);
-  }
-  return mesh;
+function voxMesh(vox, { layer = LAYER.body } = {}) {
+  return new THREE.Mesh(meshVox(vox), VOX_MATS[layer]);
 }
 
 // ---------------- the critter ----------------
@@ -449,7 +427,7 @@ function buildCritter(recipe, pal) {
       if (!E[ex2]) continue;
       let rows = E[ex2];
       if (side < 0 && E.mirrored.includes(ex2)) rows = rows.map(r => [...r].reverse().join(''));
-      m[ex2] = voxMesh(flat(rows, eyeMap), { ink: false, layer: LAYER.face });
+      m[ex2] = voxMesh(flat(rows, eyeMap), { layer: LAYER.face });
       m[ex2].visible = ex2 === 'open';
       g.add(m[ex2]);
     }
@@ -498,15 +476,6 @@ renderer.setPixelRatio(1);
 renderer.setClearColor(0x000000, 0);
 document.body.appendChild(renderer.domElement);
 
-// Software WebGL (OBS with "browser source hardware acceleration" off) can't keep up with shadows.
-let lowQuality = CFG.quality === 'low';
-if (!CFG.quality) {
-  try {
-    const gl = renderer.getContext(), ext = gl.getExtension('WEBGL_debug_renderer_info');
-    const name = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
-    if (/swiftshader|llvmpipe|software|basic render/i.test(name)) lowQuality = true;
-  } catch (e) {}
-}
 const scene = new THREE.Scene();
 const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 1000);
 const camUp = new THREE.Vector3(0, Math.cos(PITCH), -Math.sin(PITCH));
@@ -548,6 +517,9 @@ await RAPIER.init();
 const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+// Collision groups: crumbs and other bits never touch Rapier, everything else sorts itself out here.
+const G = { WORLD: 1, PET: 2, PROP: 4 };
+const groups = (member, filter) => (member << 16) | filter;
 let walls = [];
 const B = { left: -50, right: 50 };  // current walls, in voxels
 
@@ -570,7 +542,8 @@ function layout() {
   // bodies can't leave z = 0, so only a floor and two side walls are needed
   for (const c of walls) world.removeCollider(c, false);
   const wall = (x, y, hx, hy) => world.createCollider(
-    RAPIER.ColliderDesc.cuboid(hx, hy, 20).setTranslation(x, y, 0).setFriction(0.8), ground);
+    RAPIER.ColliderDesc.cuboid(hx, hy, 20).setTranslation(x, y, 0).setFriction(0.8)
+      .setCollisionGroups(groups(G.WORLD, 0xffff)), ground);
   walls = [
     wall(cx, -5, span / 2 + 50, 5),       // floor
     wall(B.left - 5, 60, 5, 80),          // left
@@ -579,6 +552,8 @@ function layout() {
 }
 layout();
 addEventListener('resize', layout);
+// world y of the top edge of the screen
+const screenTop = () => (innerHeight - CFG.ground) / PX - 0.6;
 
 // ---------------- the pet ----------------
 const pal = makePalette(CFG.seed);
@@ -603,21 +578,22 @@ class Pet {
       .setTranslation(x, y, 0).enabledTranslations(true, true, false).enabledRotations(false, false, true)
       .setAngularDamping(1.5).setCcdEnabled(true));
     world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
-      .setDensity(1).setFriction(0.9).setRestitution(0.05), this.body);
+      .setDensity(1).setFriction(0.9).setRestitution(0.05)
+      .setCollisionGroups(groups(G.PET, G.WORLD | G.PROP)), this.body);
     this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
     this.state = 'idle'; this.timer = rand(0.5, 1.5); this.target = null;
     this.facing = 0;            // -1 left, 0 toward the camera, 1 right
     this.yaw = 0; this.yawV = 0; this.glance = 0;
     this.grounded = false; this.dazed = 0; this.crouch = 0;
     this.sq = 0; this.sqV = 0; this.lastVy = 0;
-    this.blink = rand(2, 5); this.expr = 'open'; this.shownExpr = null;
+    this.blink = rand(2, 5); this.expr = 'open'; this.shownExpr = null; this.moodT = 0;
   }
 
   pos() { return this.body.translation(); }
 
   isGrounded() {
     const hit = world.castRay(new RAPIER.Ray(this.pos(), { x: 0, y: -1, z: 0 }), this.hy + 0.35, true,
-      undefined, undefined, undefined, this.body);
+      undefined, groups(G.PET, G.WORLD | G.PROP), undefined, this.body);
     return !!hit;
   }
 
@@ -662,7 +638,9 @@ class Pet {
         this.face(this.facing === 0 && Math.random() < 0.35 ? (Math.random() < 0.5 ? -1 : 1) : 0);
         this.glance = this.facing ? rand(0.6, 1.4) : rand(1.5, 4);
       }
-      if (this.timer <= 0) {
+      const food = props.find(pr => pr.kind === 'food');
+      if (food && food.pos().y < 8) { this.state = 'eat'; this.target = food; }
+      else if (this.timer <= 0) {
         const m = this.hx + 2;
         const ball = props.find(pr => pr.kind === 'ball');
         if (ball && Math.random() < 0.45) {
@@ -676,21 +654,48 @@ class Pet {
         this.state = 'move';
       }
     } else if (this.state === 'move') {
-      const dx = this.target.x - p.x, dist = Math.abs(dx);
-      if (dist > 0.5) this.face(Math.sign(dx));
-      if (dist < 2) { this.state = 'idle'; this.timer = rand(1, 4); this.glance = rand(0.3, 1); }
-      else if (this.grounded && this.dazed <= 0 && Math.abs(roll) < 0.4) {
-        this.crouch += dt;
-        if (this.crouch > 0.14) {
-          this.crouch = 0;
-          const air = 2 * S.hopV / GRAVITY;
-          const hs = Math.min(S.hopS, dist / air);
-          const m = b.mass();
-          b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (S.hopV - v.y), z: 0 }, true);
-          this.sqV += 3;
+      if (this.hopToward(this.target.x, 2, dt, roll)) { this.state = 'idle'; this.timer = rand(1, 4); this.glance = rand(0.3, 1); }
+    } else if (this.state === 'eat') {
+      const food = this.target;
+      if (food.gone) { this.state = 'idle'; this.timer = rand(1, 3); this.mood('happy', 1.6); return; }
+      const fp = food.pos(), side = Math.sign(p.x - fp.x) || 1;
+      // stand right next to it, facing it
+      const spot = fp.x + side * (this.hx + food.size[0] / 2 + 0.3);
+      if (this.hopToward(spot, 1.2, dt, roll)) {
+        this.face(-side);
+        this.chomp = (this.chomp ?? 0) - dt;
+        if (this.chomp <= 0 && this.grounded) {
+          this.chomp = 0.45;
+          this.sqV -= 2.2;
+          biteFood(food, p.x);
         }
       }
     }
+    if (this.moodT > 0 && (this.moodT -= dt) <= 0) this.expr = 'open';
+  }
+
+  // show an expression for a while
+  mood(expr, secs) { this.expr = expr; this.moodT = secs; }
+
+  // Hop toward x. Returns true once within `near` of it.
+  hopToward(x, near, dt, roll) {
+    const S = this.S, b = this.body, p = this.pos(), v = b.linvel();
+    const dx = x - p.x, dist = Math.abs(dx);
+    if (dist <= near) { this.crouch = 0; return true; }
+    if (dist > 0.5) this.face(Math.sign(dx));
+    if (this.grounded && this.dazed <= 0 && Math.abs(roll) < 0.4) {
+      this.crouch += dt;
+      if (this.crouch > 0.14) {
+        this.crouch = 0;
+        // short distances get a small shuffle-hop instead of a full jump
+        const hv = dist < 6 ? S.hopV * 0.6 : S.hopV;
+        const hs = Math.min(S.hopS, dist / (2 * hv / GRAVITY));
+        const m = b.mass();
+        b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (hv - v.y), z: 0 }, true);
+        this.sqV += 3;
+      }
+    }
+    return false;
   }
 
   eggStep(dt) {
@@ -753,30 +758,211 @@ class Pet {
 }
 
 // ---------------- props ----------------
+// Physical things in the world. Each is a voxel model on a Rapier body locked to the screen plane.
 const props = [];
-function dropBall(x) {
-  const r = 2.2;
-  const vox = new Vox(), cols = [0xff4d6d, 0xffffff, 0x3ab0ff, 0xffd23f];
-  for (let a = -3; a <= 2; a++) for (let b2 = -3; b2 <= 2; b2++) for (let c = -3; c <= 2; c++) {
-    const d = Math.hypot(a + 0.5, b2 + 0.5, c + 0.5);
-    if (d <= 2.9) vox.set(a, b2, c, cols[(Math.floor(Math.atan2(c + 0.5, a + 0.5) / (Math.PI / 2) + 4)) % 4]);
+
+class Prop {
+  // shape: 'ball' or 'box'. fixed: true for furniture that never moves.
+  constructor(kind, vox, { x, y, shape = 'ball', density = 0.3, restitution = 0.3, friction = 0.8, fixed = false, scale = 1 } = {}) {
+    this.kind = kind; this.vox = vox; this.scale = scale;
+    const [mn, mx] = vox.bounds();
+    // centre of the model in its own voxel space; stays fixed even as bites shrink the model
+    this.center = [(mn[0] + mx[0] + 1) / 2, (mn[1] + mx[1] + 1) / 2, (mn[2] + mx[2] + 1) / 2];
+    this.size = [mx[0] - mn[0] + 1, mx[1] - mn[1] + 1, mx[2] - mn[2] + 1].map(v => v * scale);
+    this.g = new THREE.Group();
+    scene.add(this.g);
+    this.rebuild();
+    this.shadow = blobShadow();
+    const desc = fixed ? RAPIER.RigidBodyDesc.fixed() : RAPIER.RigidBodyDesc.dynamic()
+      .enabledTranslations(true, true, false).enabledRotations(false, false, true)
+      .setCcdEnabled(true).setLinearDamping(0.15).setAngularDamping(0.5);
+    this.body = world.createRigidBody(desc.setTranslation(x, y, 0));
+    const [sx, sy, sz] = this.size;
+    this.r = shape === 'ball' ? Math.max(sx, sy) / 2 * 0.92 : sy / 2;
+    const cd = shape === 'ball' ? RAPIER.ColliderDesc.ball(this.r) : RAPIER.ColliderDesc.cuboid(sx / 2, sy / 2, sz / 2);
+    world.createCollider(cd.setDensity(density).setRestitution(restitution).setFriction(friction)
+      .setCollisionGroups(groups(G.PROP, G.WORLD | G.PET | G.PROP)), this.body);
+    this.halfH = sy / 2;
+    props.push(this);
   }
-  const mesh = voxMesh(vox);
-  const g = new THREE.Group();
-  mesh.scale.setScalar(r / 2.9);
-  g.add(mesh);
-  scene.add(g);
-  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
-    .setTranslation(x ?? rand(B.left + 10, B.right - 10), 70, 0).setCcdEnabled(true)
-    .enabledTranslations(true, true, false).enabledRotations(false, false, true)
-    .setLinearDamping(0.15).setAngularDamping(0.4));
-  world.createCollider(RAPIER.ColliderDesc.ball(r).setDensity(0.12).setRestitution(0.65).setFriction(0.6), body);
-  props.push({ kind: 'ball', body, g, w: r * 2, r, shadow: blobShadow() });
+  rebuild() {
+    if (this.mesh) { this.g.remove(this.mesh); this.mesh.geometry.dispose(); }
+    this.mesh = voxMesh(this.vox);
+    this.mesh.scale.setScalar(this.scale);
+    this.mesh.position.set(...this.center.map(c => -c * this.scale));
+    this.g.add(this.mesh);
+  }
+  pos() { return this.body.translation(); }
+  update() {
+    const p = this.pos();
+    this.g.position.set(p.x, p.y, 0);
+    this.g.quaternion.copy(this.body.rotation());
+    placeShadow(this.shadow, p.x, this.size[0], Math.max(0, p.y - this.halfH));
+  }
+  remove() {
+    scene.remove(this.g, this.shadow);
+    world.removeRigidBody(this.body);
+    props.splice(props.indexOf(this), 1);
+    this.gone = true;
+  }
 }
+
+// --- food ---
+// Small voxel snacks. bites = how many chomps it takes to finish one.
+const sphereVox = (r, paint) => {
+  const vox = new Vox(), n = Math.ceil(r);
+  for (let x = -n; x < n; x++) for (let y = -n; y < n; y++) for (let z = -n; z < n; z++) {
+    if (Math.hypot(x + 0.5, y + 0.5, z + 0.5) <= r) vox.set(x, y, z, paint(x, y, z));
+  }
+  return vox;
+};
+const FOODS = {
+  apple: { bites: 4, make() {
+    const v = sphereVox(2.3, (x, y) => (y >= 1 && x < 0 ? 0xff7a6e : 0xe8433a));
+    v.set(0, 2, 0, 0x7a4a2a); v.set(0, 3, 0, 0x7a4a2a); v.set(1, 3, 0, 0x5cc04a); v.set(2, 3, 0, 0x5cc04a);
+    return v;
+  } },
+  fish: { bites: 5, make() {
+    const v = new Vox();
+    for (let x = -3; x <= 2; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 0; z++) {
+      if (Math.abs(y) === 1 && (x === -3 || x === 2)) continue;
+      v.set(x, y, z, y === -1 ? 0xd6e4ef : 0x7fa8c9);
+    }
+    for (const y of [-2, -1, 1, 2]) v.set(3 + (Math.abs(y) === 2 ? 1 : 0), y, 0, 0x5b86ab);
+    v.set(3, 0, 0, 0x5b86ab);
+    v.set(-2, 0, 1, 0x1a1a22);
+    return v;
+  } },
+  cookie: { bites: 3, make() {
+    const v = new Vox(), chips = [[-1, 1], [1, -1], [2, 1], [-2, -1], [0, 0]];
+    for (let x = -3; x < 3; x++) for (let y = -3; y < 3; y++) {
+      if (Math.hypot(x + 0.5, y + 0.5) > 3) continue;
+      v.set(x, y, 0, chips.some(([cx, cy]) => cx === x && cy === y) ? 0x5a3420 : 0xd9a05b);
+      v.set(x, y, -1, 0xc48a48);
+    }
+    return v;
+  } },
+  cake: { bites: 6, make() {
+    const v = new Vox();
+    for (let x = -3; x < 3; x++) for (let z = -2; z < 2; z++) {
+      for (let y = 0; y < 4; y++) v.set(x, y, z, y === 3 ? 0xffb3d1 : y === 1 ? 0xfff1c9 : 0xf3d39a);
+    }
+    v.set(0, 4, 0, 0xe0213f); v.set(-1, 4, 0, 0xe0213f);
+    return v;
+  } },
+};
+// The dispenser drops food in from the top of the screen.
+function dropFood(kind = Object.keys(FOODS)[Math.floor(Math.random() * 3)], x) {
+  const F = FOODS[kind];
+  const p = new Prop('food', F.make(), { x: x ?? rand(B.left + 10, B.right - 10), y: screenTop() + 6, density: 0.25, restitution: 0.35 });
+  p.food = kind; p.bitesLeft = F.bites; p.bitesTotal = F.bites;
+  p.body.setAngvel({ x: 0, y: 0, z: rand(-4, 4) }, true);
+  return p;
+}
+// Take a bite from the side facing `fromX`. Returns false once there's nothing left.
+function biteFood(food, fromX) {
+  const p = food.pos(), side = Math.sign(fromX - p.x) || 1;
+  const all = [...food.vox.each()];
+  const n = Math.ceil(all.length / food.bitesLeft);
+  // nearest voxels to the biter first: in world x, through the prop's current rotation
+  const roll = rollOf(tmpQ.copy(food.body.rotation())), c = Math.cos(roll), s = Math.sin(roll);
+  all.sort((a, b) => side * ((b[0] * c - b[1] * s) - (a[0] * c - a[1] * s)));
+  for (const [x, y, z, col] of all.slice(0, n)) {
+    food.vox.m.delete(Vox.key(x, y, z));
+    if (Math.random() < 0.6) {
+      spawnBits(p.x + side * food.size[0] * 0.3, p.y, [col], 1, { vx: side * rand(4, 12), vy: rand(8, 20) });
+    }
+  }
+  food.bitesLeft--;
+  if (food.bitesLeft <= 0 || food.vox.m.size === 0) { food.remove(); return false; }
+  food.rebuild();
+  return true;
+}
+
+// --- poop (gets swept away by the clean-up) ---
+function dropPoop(x, y) {
+  const v = new Vox(), c = [0x7a4f2a, 0x8d5c33];
+  for (let x2 = -2; x2 < 2; x2++) for (let z = -1; z < 1; z++) v.set(x2, 0, z, c[0]);
+  for (let x2 = -1; x2 < 1; x2++) for (let z = -1; z < 1; z++) v.set(x2, 1, z, c[1]);
+  v.set(0, 2, 0, c[0]);
+  return new Prop('poop', v, { x, y, shape: 'box', density: 0.6, restitution: 0.05, friction: 1 });
+}
+
+// --- bed: a cushion it sleeps on ---
+function placeBed(x) {
+  const v = new Vox();
+  for (let x2 = -7; x2 < 7; x2++) for (let z = -3; z < 3; z++) {
+    const edge = x2 === -7 || x2 === 6 || z === -3 || z === 2;
+    v.set(x2, 0, z, pal.dark);
+    if (edge) v.set(x2, 1, z, pal.accent);
+  }
+  return new Prop('bed', v, { x, y: 1, shape: 'box', fixed: true, friction: 1 });
+}
+
+// --- ball ---
+function dropBall(x) {
+  const cols = [0xff4d6d, 0xffffff, 0x3ab0ff, 0xffd23f];
+  const vox = sphereVox(2.9, (a, b, c) => cols[(Math.floor(Math.atan2(c + 0.5, a + 0.5) / (Math.PI / 2) + 4)) % 4]);
+  return new Prop('ball', vox, { x: x ?? rand(B.left + 10, B.right - 10), y: screenTop() + 6,
+    density: 0.12, restitution: 0.65, friction: 0.6, scale: 2.2 / 2.9 });
+}
+
+// ---------------- bits: crumbs, sparkles, Zzz ----------------
+// Hundreds of tiny cubes in one instanced mesh. They don't need Rapier: they live in the screen plane
+// and only have to bounce off the floor and walls, so they get a few lines of physics of their own.
+const BITS_MAX = 400;
+const bitsMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial(), BITS_MAX);
+bitsMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+bitsMesh.count = 0;
+bitsMesh.frustumCulled = false;
+scene.add(bitsMesh);
+const bits = [];
+// opts: vx, vy (base velocity), spread, size, life, grav (1 = normal, 0 = floats), z
+function spawnBits(x, y, colors, n, opts = {}) {
+  const { vx = 0, vy = 10, spread = 8, size = 0.55, life = 2.5, grav = 1, z = 0 } = opts;
+  for (let i = 0; i < n && bits.length < BITS_MAX; i++) {
+    bits.push({
+      x, y, z: z + rand(-0.5, 0.5), vx: vx + rand(-spread, spread), vy: vy + rand(-spread, spread) * 0.5,
+      a: rand(0, 6), va: rand(-10, 10), s: size * rand(0.8, 1.2), life: life * rand(0.8, 1.2), age: 0, grav,
+      color: new THREE.Color(colors[Math.floor(Math.random() * colors.length)]),
+    });
+  }
+}
+const bitM = new THREE.Matrix4(), bitQ = new THREE.Quaternion(), bitE = new THREE.Euler(), bitS = new THREE.Vector3(), bitP = new THREE.Vector3();
+function updateBits(dt) {
+  for (let i = bits.length - 1; i >= 0; i--) {
+    const b = bits[i];
+    b.age += dt;
+    if (b.age >= b.life) { bits.splice(i, 1); continue; }
+    b.vy -= GRAVITY * b.grav * dt;
+    if (b.grav === 0) { b.vx *= 1 - dt * 1.5; b.vy *= 1 - dt * 1.5; }
+    b.x += b.vx * dt; b.y += b.vy * dt; b.a += b.va * dt;
+    if (b.y < b.s / 2 && b.grav > 0) { b.y = b.s / 2; b.vy = Math.abs(b.vy) * 0.35; b.vx *= 0.6; b.va *= 0.6; }
+    if (b.x < B.left) { b.x = B.left; b.vx = Math.abs(b.vx) * 0.5; }
+    if (b.x > B.right) { b.x = B.right; b.vx = -Math.abs(b.vx) * 0.5; }
+  }
+  bitsMesh.count = bits.length;
+  bits.forEach((b, i) => {
+    const k = b.s * Math.min(1, (b.life - b.age) * 3);  // shrink away at the end
+    bitM.compose(bitP.set(b.x, b.y, b.z), bitQ.setFromEuler(bitE.set(0, 0, b.a)), bitS.set(k, k, k));
+    bitsMesh.setMatrixAt(i, bitM);
+    bitsMesh.setColorAt(i, b.color);
+  });
+  bitsMesh.instanceMatrix.needsUpdate = true;
+  if (bitsMesh.instanceColor) bitsMesh.instanceColor.needsUpdate = true;
+}
+const SPARKLE = [0xffffff, 0xfff3a0, 0xa8f0ff];
 
 // ---------------- loop ----------------
 const pet = new Pet(STAGES[CFG.stage], CFG.stage, (B.left + B.right) / 2);
+placeBed(B.left + 14);
 if (CFG.ball) dropBall();
+function dropThing(kind = 'ball') {
+  if (kind === 'ball') dropBall();
+  else if (kind === 'poop') dropPoop(pet.pos().x + (pet.facing ? -pet.facing * 6 : 6), 10);
+  else if (kind === 'food' || FOODS[kind]) dropFood(FOODS[kind] ? kind : undefined);
+}
+for (const k of (Q.get('drop') || '').split(',').filter(Boolean)) dropThing(k);
 
 let debugLines = null;
 if (CFG.debug) {
@@ -792,6 +978,7 @@ function stepSim(dt) {
   world.step();
   // anything that escaped the walls comes back in from above
   for (const pr of [pet, ...props]) {
+    if (pr.body.isFixed()) continue;
     const p = pr.body.translation();
     if (p.y < -30 || p.x < B.left - 5 || p.x > B.right + 5) {
       pr.body.setTranslation({ x: clamp(p.x, B.left + 8, B.right - 8), y: 40, z: 0 }, true);
@@ -824,18 +1011,14 @@ function frame(now) {
   if (n === 6) acc = 0;
 
   pet.update(dt);
-  for (const pr of props) {
-    const p = pr.body.translation();
-    pr.g.position.set(p.x, p.y, p.z);
-    pr.g.quaternion.copy(pr.body.rotation());
-    placeShadow(pr.shadow, p.x, pr.w, Math.max(0, p.y - pr.r));
-  }
+  for (const pr of props) pr.update();
+  updateBits(dt);
   if (debugLines) {
     const { vertices, colors } = world.debugRender();
     debugLines.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     debugLines.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
     const p = pet.pos();
-    hud.textContent = `fps ${fps.toFixed(0)}  quality ${lowQuality ? 'low' : 'high'}\n` +
+    hud.textContent = `fps ${fps.toFixed(0)}\n` +
       `stage ${pet.stage}  seed ${CFG.seed}  pattern ${pal.pattern}\n` +
       `state ${pet.state}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}\n` +
       `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
@@ -852,7 +1035,7 @@ window.pet = {
     b.applyImpulse({ x: m * 25 * s * power, y: m * 30 * power, z: 0 }, true);
     b.applyTorqueImpulse({ x: 0, y: 0, z: -s * pet.inertia * 9 * power }, true);
   },
-  drop(kind = 'ball') { if (kind === 'ball') dropBall(); },
+  drop: dropThing,
   stage(s) { if (STAGES[s]) { const p = pet.pos(); pet.build(STAGES[s], s, p.x, p.y + 6); } },
   expr(e) { pet.expr = e; },
 };

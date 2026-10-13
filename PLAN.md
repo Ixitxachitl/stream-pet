@@ -26,7 +26,8 @@ surprise.
 | Shadows   | 2D-style blob shadow under each object | Readable from the front, and much cheaper than shadow maps. |
 | Loop      | Fixed 60 Hz physics step with an accumulator, render on rAF, dt clamped | Keeps it stable when OBS throttles the source. |
 
-Render at pixelRatio 1 and cap the frame rate, with a "low" quality option that drops the ink outlines.
+Render at pixelRatio 1 and cap the frame rate. No outlines: the voxels are drawn plain, with lighting
+and AO doing the shaping.
 Pause on `visibilitychange` / `obsSourceVisibleChanged`, as in `cat-rave/index.html`. On wake, don't
 replay the hidden time as physics. Hand it to the life simulation as "time passed" (see §5).
 
@@ -74,8 +75,9 @@ it turns, and squash & stretch does most of the acting.
 4. **Variation**: the form sets the parts and the colour family. On top of that, each pet's seed
    shifts the shades and picks the pattern (spots, stripes, socks), so two streamers with the same form
    still have different-looking pets.
-5. **Debris**: an `InstancedMesh` pool of single voxels (~300 max) for crumbs, poop splats, sparkles and
-   eggshell bits. Each one is a small Rapier cuboid that sleeps, then fades out.
+5. **Bits**: an `InstancedMesh` pool of single voxels (400 max) for crumbs, sparkles, Zzz and eggshell
+   bits. They skip Rapier: in the screen plane they only need to bounce off the floor and walls, so a
+   few lines of their own physics is enough and much cheaper.
 
 ## 4. Physics
 
@@ -260,12 +262,12 @@ SFX volume · Save slot · Export / Import / **Reset pet** (with confirm) · Cop
 ## 11. Risks
 
 - **OBS CEF**: importmaps, WebGL2 and WASM are fine on OBS 30+. Test on the oldest OBS you want to support.
-  If "Browser source hardware acceleration" is off, WebGL falls back to software, so detect that and
-  switch to low quality automatically.
+  If "Browser source hardware acceleration" is off, WebGL falls back to software. Without shadow maps
+  or outlines the scene is light, so it should still keep up; check it.
 - **Physics stability**: tipping, tunnelling of small debris, stacking jitter. Mitigate with the upright
   controller, CCD on small fast props, sleeping and caps.
 - **Readability at stream size**: voxel pets get small fast. Default to a fairly large size (~160 px
-  tall adult) with high-contrast outlines (back-face hull or a light rim).
+  tall adult) and strong colour contrast between body, belly and accents.
 - **Ugly or samey forms**: with hundreds of forms put together by rules, some will look bad or too
   alike. That's what the compatibility rules, the silhouette check, the gallery and the override table
   are for. Plan real time for reviewing the gallery.

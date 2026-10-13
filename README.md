@@ -13,7 +13,7 @@ python -m http.server 8000
 ```
 
 Useful URL parameters for now: `stage` (egg, baby, child, adult), `seed`, `size`, `ground`, `xmin`/`xmax`,
-`ball=1`, `debug=1`, `quality=low`. The full list is at the top of [index.html](index.html).
+`ball=1`, `debug=1`. The full list is at the top of [index.html](index.html).
 
 ## Credits
 
