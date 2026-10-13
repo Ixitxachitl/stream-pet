@@ -19,7 +19,9 @@
     youtube   a live video ID or link (needs ytkey), or a ws:// bridge
     ytkey     YouTube Data API v3 key ytpoll    seconds between YouTube checks (default 6)
     ignore    extra bot names to ignore, comma separated
-    cmds      1 = chat can use !pet (hearts) and !pet stats
+    cmds      1 = chat can use !pet (hearts), !pet stats and !pet say
+    talk      1 = learn words from chat (used by 3+ chatters) and say silly phrases; mods: !pet forget <word>
+    neverlearn  words it should never learn, comma separated (on top of a built-in bad-words list)
     demo      1 = fake chat for trying it out (never counts toward how it grows up)
 
   Pet and where it lives:
@@ -50,7 +52,7 @@
 
   Custom integrations (Streamer.bot, etc.) can call:
     window.pet.chat(name, text), .sub(name, count), .bits(name, amount), .raid(name, viewers), .follow(name),
-    .feed(kind), .play(), .stats()
+    .feed(kind), .play(), .stats(), .say(text), .words()
   and for testing: .hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy'), .evolve(), .save()
 -->
 <style>
@@ -134,10 +136,12 @@
   /* ---------- on stream: the same voxel look (notched outlines, lit blocks, pixel fonts) ---------- */
   @keyframes pop{from{scale:.3}to{scale:1}}
   /* thought bubble, moved over the pet's head every frame; square "thinking" dots below it */
-  #bubble{position:fixed;left:0;top:0;margin:-62px 0 0 -6px;padding:8px 10px;background:#fffaf0;
+  #bubble{position:fixed;left:0;top:0;padding:8px 10px;background:#fffaf0;
     box-shadow:var(--vx),var(--lit);pointer-events:none;will-change:transform;opacity:0;transition:opacity .25s;
     font:30px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;transform-origin:20% 100%}
   #bubble.show{opacity:1;animation:pop .35s cubic-bezier(.3,1.6,.5,1)}
+  /* when it talks: words in the pixel font, wrapping if it's chatty */
+  #bubble.say{font:11px/1.6 var(--pix);color:var(--ink);padding:9px 11px;max-width:240px;width:max-content}
   #bubble::before,#bubble::after{content:"";position:absolute;background:#fffaf0;box-shadow:var(--vx)}
   #bubble::before{left:12px;bottom:-16px;width:8px;height:8px}
   #bubble::after{left:4px;bottom:-28px;width:4px;height:4px}
@@ -214,6 +218,8 @@ const FIELDS = [
   { k: 'name', label: 'Name', type: 'text', def: '', ph: '(a cute generated one)', help: 'Leave empty to let it have its own.' },
   { k: 'size', label: 'Grown-up size (px)', type: 'num', def: 160, min: 60, max: 400, step: 5, help: 'How tall an adult is on screen. Babies are smaller.' },
   { k: 'status', label: 'Status card', type: 'select', def: 'events', opts: [['events', 'On big moments'], ['always', 'Always'], ['off', 'Never']] },
+  { k: 'talk', label: 'Learn words from chat', type: 'bool', def: false, help: 'It picks up words 3+ chatters use and mixes them into silly phrases. Mods can type !pet forget <word>.' },
+  { k: 'neverlearn', label: 'Never learn these', type: 'text', def: '', ph: 'word, another', help: 'On top of a built-in list of bad words.' },
   { k: 'sfx', label: 'Sound effects volume', type: 'num', def: 0, min: 0, max: 100, step: 5, help: '0 = off. In OBS, tick "Control audio via OBS" to hear them.' },
   { k: 'night', label: 'Bedtime hours', type: 'text', def: '1-7', ph: '1-7', help: 'Your local time. 1-7 is 1 am to 7 am; 1pm-7pm or 13-19 for the afternoon; 11pm-7am overnight. "off" for never.' },
   { sec: 'Where it lives' },
@@ -2350,7 +2356,7 @@ const recentChat = [];             // message times, for spotting hype
 let demoing = false;               // true while demo chat is speaking: it doesn't count
 const counts = () => !demoing;
 
-function onChat({ name, text = '', platform = 'custom', emoteOnly = false }) {
+function onChat({ name, text = '', platform = 'custom', emoteOnly = false, mod = false, first = false }) {
   if (!name || BOTS.has(String(name).toLowerCase())) return;
   const T = save.traits, now = performance.now();
   N.social = clamp(N.social + 3, 0, 100);
@@ -2375,12 +2381,16 @@ function onChat({ name, text = '', platform = 'custom', emoteOnly = false }) {
     if (counts()) T.hyped += 0.03;
   }
   if (!pet.asleep && pet.action?.name === 'idle' && Math.random() < 0.4) pet.face(Math.random() < 0.5 ? -1 : 1); // glances over
+  if (!first) learnFrom(text, name, platform);
+  const fm = /^!pet\s+forget\s+(\S+)/i.exec(text);
+  if (fm && mod && CFG.talk) { forgetWord(fm[1]); floatText(pet.pos().x, pet.pos().y + pet.hy + 2, '?', 'heart'); return; }
   if (CFG.cmds && /^!pet\b/i.test(text)) petCommand(text.slice(4).trim().toLowerCase(), name);
 }
 
 function petCommand(arg, name) {
   const q = pet.pos();
   if (arg === 'stats') { showStatus(6000); return; }
+  if (arg === 'say' && CFG.talk) { say(); return; }
   for (let i = 0; i < 3; i++) setTimeout(() => floatText(q.x + rand(-3, 3), q.y + pet.hy + 2, '♥', 'heart'), i * 180);
   if (!pet.asleep) pet.mood('happy', 1.5);
 }
@@ -2481,7 +2491,8 @@ function connectTwitch(channel) {
       const m = /^(?:@(\S+) )?:([^!\s]+)![^ ]+ PRIVMSG #\S+ :(.*)$/.exec(line);
       if (m) {
         const tags = m[1] ? parseTags(m[1]) : {}, name = tags['display-name'] || m[2];
-        onChat({ name, text: m[3], platform: 'twitch', emoteOnly: tags['emote-only'] === '1' });
+        onChat({ name, text: m[3], platform: 'twitch', emoteOnly: tags['emote-only'] === '1',
+          mod: /(^|,)(broadcaster|moderator)\//.test(tags.badges || ''), first: tags['first-msg'] === '1' });
         if (+tags.bits > 0) onBits({ name, amount: +tags.bits });
         continue;
       }
@@ -2522,7 +2533,8 @@ function kickSocket(chatroom) {
     const ev2 = String(o.event).split('\\').pop();
     if (ev2 === 'ChatMessageEvent') {
       const text = (d.content || '').replace(/\[emote:\d+:([^\]]+)\]/g, '$1');
-      onChat({ name: d.sender?.username, text, platform: 'kick', emoteOnly: /^(\s*\[emote:[^\]]+\]\s*)+$/.test(d.content || '') });
+      onChat({ name: d.sender?.username, text, platform: 'kick', emoteOnly: /^(\s*\[emote:[^\]]+\]\s*)+$/.test(d.content || ''),
+        mod: (d.sender?.identity?.badges || []).some(b => ['broadcaster', 'moderator'].includes(b.type)) });
     } else if (ev2 === 'SubscriptionEvent') onSub({ name: d.username, count: 1 });
     else if (ev2 === 'GiftedSubscriptionsEvent') onSub({ name: d.gifter_username, count: (d.gifted_usernames || []).length || 1 });
     else if (ev2 === 'StreamHostEvent') onRaid({ name: d.host_username, viewers: +d.number_viewers || 1 });
@@ -2619,6 +2631,158 @@ function startChat() {
   if (CFG.demo) runDemo();
 }
 
+// ---------------- talking: words it picks up from chat ----------------
+// With "Learn words from chat" on, the pet slowly picks up chat's words and mixes them into silly
+// little phrases (a tiny Markov chain). Kept small and careful:
+//  - a word is only learned once 3 different chatters have used it, so one person can't teach it
+//    anything, but chat's running jokes catch on fast
+//  - links, @mentions, anything with numbers, long words, !commands, bots and first-time chatters
+//    are never learned, nor anything on a public bad-words list or your own never-learn list
+//  - at most 300 words, each remembering up to 6 words that follow it; the least used are forgotten
+//  - mods (and you) can type !pet forget <word>, and the settings can wipe it all
+// It learns nothing at all until the bad-words list has loaded.
+const VOCAB_MAX = 300, CAND_MAX = 600, NEXT_MAX = 6, TEACHERS = 3;
+let badWords = null, badPhrases = [];
+const neverLearn = new Set(CFG.neverlearn.toLowerCase().split(/[\s,]+/).filter(Boolean));
+if (CFG.talk) {
+  fetch('https://cdn.jsdelivr.net/npm/naughty-words@1.2.0/en.json')
+    .then(r => r.json())
+    .then(list => {
+      badWords = new Set(list.filter(w => !w.includes(' ')).map(w => w.toLowerCase()));
+      badPhrases = list.filter(w => w.includes(' ')).map(w => w.toLowerCase());
+    })
+    .catch(() => console.warn('[pet] bad-words list failed to load; not learning words this session'));
+}
+const vocab = () => (save.vocab ??= { known: {}, cand: {} });
+const vocabSize = () => Object.keys(vocab().known).filter(w => w !== '^').length;
+
+function isBad(w) {
+  const l = w.toLowerCase();
+  if (neverLearn.has(l) || badWords.has(l)) return true;
+  for (const b of badWords) if (b.length >= 4 && l.includes(b)) return true; // stems inside longer words
+  return false;
+}
+// a chat word worth learning: letters only (emote names count), not too short or long, nothing bad
+function cleanWord(raw) {
+  const w = raw.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+  if (w.length < 2 || w.length > 14 || /[^\p{L}']/u.test(w)) return null;
+  if (/[@/:.]/.test(raw) || /\d/.test(raw)) return null;
+  // emote-style CamelCase keeps its case; everything else is lower case
+  const word = /^[A-Z]?[a-z]+[A-Z]/.test(w) ? w : w.toLowerCase();
+  return isBad(word) ? null : word;
+}
+
+function learnFrom(text, name, platform) {
+  if (!CFG.talk || !badWords || !counts() || /^\s*!/.test(text)) return;
+  const V = vocab(), who = hashStr(platform + ':' + String(name).toLowerCase()), now = save.t;
+  let prev = '^';
+  for (const raw of text.split(/\s+/).slice(0, 20)) {
+    const w = raw && cleanWord(raw);
+    if (!w) { prev = null; continue; } // a skipped word breaks the chain
+    // words still being learned keep who's said them and what followed them, so nothing chat said
+    // before a word caught on is wasted; they're only ever spoken once learned
+    let k = V.known[w];
+    if (!k) {
+      const c = V.cand[w] ??= { h: [], nx: {} };
+      if (!c.h.includes(who)) c.h.push(who);
+      if (c.h.length >= TEACHERS) { delete V.cand[w]; k = V.known[w] = { c: 1, t: now, nx: c.nx }; }
+    } else { k.c++; k.t = now; }
+    if (prev) addNext(prev === '^' ? (V.known['^'] ??= { c: 0, t: now, nx: {} }) : (V.known[prev] ?? V.cand[prev]), w);
+    prev = w;
+  }
+  if (prev && prev !== '^') addNext(V.known[prev] ?? V.cand[prev], '$');
+  trimVocab();
+}
+function addNext(from, w) {
+  if (!from) return;
+  from.nx[w] = (from.nx[w] ?? 0) + 1;
+  const nk = Object.keys(from.nx);
+  if (nk.length > NEXT_MAX) delete from.nx[nk.reduce((a, b) => (from.nx[a] <= from.nx[b] ? a : b))];
+}
+// forget the least useful words: rarely used and not heard in a while
+function trimVocab() {
+  const V = vocab(), day = 86400;
+  const score = (k) => k.c / (1 + (save.t - k.t) / day);
+  const words = Object.keys(V.known).filter(w => w !== '^');
+  if (words.length > VOCAB_MAX) {
+    words.sort((a, b) => score(V.known[a]) - score(V.known[b]));
+    for (const w of words.slice(0, words.length - VOCAB_MAX)) forgetWord(w);
+  }
+  const cand = Object.keys(V.cand);
+  if (cand.length > CAND_MAX) for (const w of cand.slice(0, cand.length - CAND_MAX)) delete V.cand[w];
+}
+function forgetWord(word) {
+  const V = vocab(), l = word.toLowerCase();
+  for (const w of Object.keys(V.known)) {
+    if (w.toLowerCase() === l) delete V.known[w];
+    else for (const n of Object.keys(V.known[w].nx)) if (n.toLowerCase() === l) delete V.known[w].nx[n];
+  }
+  for (const w of Object.keys(V.cand)) {
+    if (w.toLowerCase() === l) delete V.cand[w];
+    else for (const n of Object.keys(V.cand[w].nx)) if (n.toLowerCase() === l) delete V.cand[w].nx[n];
+  }
+}
+
+// Its own baby talk, from syllables picked by its seed, so every pet babbles a bit differently.
+function babble(n = 1 + Math.floor(Math.random() * 2)) {
+  const r = rngFrom(hashStr('babble:' + save.seed));
+  const sy = Array.from({ length: 5 }, () => ['m', 'b', 'p', 'n', 'w', 'bl', 'pr', 'gl', 'l', 'y'][Math.floor(r() * 10)] +
+    ['i', 'a', 'o', 'u', 'ee', 'oo', 'ip', 'op', 'ub', 'eep'][Math.floor(r() * 10)]);
+  return Array.from({ length: n }, () => { const s = sy[Math.floor(Math.random() * sy.length)]; return Math.random() < 0.3 ? s + s : s; }).join(' ');
+}
+const pickWeighted = (obj) => {
+  const e = Object.entries(obj), tot = e.reduce((a, [, c]) => a + c, 0);
+  let x = Math.random() * tot;
+  for (const [k, c] of e) if ((x -= c) <= 0) return k;
+  return e[e.length - 1]?.[0];
+};
+// Something to say, matched to how grown up it is: babies babble, children try single words, teens
+// put two together, adults and elders manage short phrases.
+function phrase() {
+  const V = vocab(), known = Object.keys(V.known).filter(w => w !== '^');
+  const st = save.stage, maxLen = { baby: 0, child: 1, teen: 2, adult: 5, elder: 5 }[st] ?? 0;
+  if (!maxLen || known.length < 3 || Math.random() < 0.2) return babble() + (Math.random() < 0.5 ? '!' : '');
+  const learned = (nx) => Object.fromEntries(Object.entries(nx).filter(([n]) => n === '$' || V.known[n]));
+  let words = [];
+  for (let tries = 0; tries < 6 && words.length < Math.min(2, maxLen); tries++) {
+    words = [];
+    const starts = V.known['^'] ? learned(V.known['^'].nx) : {};
+    let w = Object.keys(starts).length && Math.random() < 0.7 ? pickWeighted(starts) : pickWeighted(Object.fromEntries(known.map(k => [k, V.known[k].c])));
+    while (w && w !== '$' && words.length < maxLen) {
+      words.push(w);
+      const nx = learned(V.known[w].nx);
+      w = Object.keys(nx).length && Math.random() < 0.9 ? pickWeighted(nx) : null;
+    }
+  }
+  if (!words.length) return babble();
+  if (maxLen === 1 && Math.random() < 0.3) words.push(words[0]);    // "pog pog"
+  if (Math.random() < 0.25) words.push(babble(1));                   // a bit of baby talk mixed in
+  const text = words.join(' ');
+  if (badPhrases.some(b => (' ' + text.toLowerCase() + ' ').includes(' ' + b + ' '))) return babble();
+  return text + ['', '!', '!!', '?', '~', '...'][Math.floor(Math.random() * 6)];
+}
+
+// Speech goes in the bubble too, in the pixel font.
+function say(text = phrase()) {
+  if (!text || save.stage === 'egg') return;
+  showBubble(text, true);
+  if (!pet.asleep) pet.mood('happy', 1);
+  sfx('chirp');
+}
+// Every few minutes it pipes up (more often the more sociable it is), and it mumbles in its sleep.
+let sayTimer = rand(40, 90);
+function tickTalk(dt) {
+  if (!CFG.talk || save.stage === 'egg' || cutscene || !onScreen()) return;
+  if ((sayTimer -= dt) > 0) return;
+  const sociable = clamp(share(save, 'social') * 3, 0, 1);
+  sayTimer = rand(90, 240) * (1 - 0.5 * sociable);
+  if (pet.asleep) {
+    const V = vocab(), known = Object.keys(V.known).filter(w => w !== '^');
+    const word = known.length && Math.random() < 0.6 ? known[Math.floor(Math.random() * known.length)] : babble(1);
+    say(`zzz... ${word}... zzz`);
+  } else say();
+}
+
 // ---- status card: name, stage and needs, over the pet ----
 // ?status=events (default) shows it for a while on big moments and !pet stats, always keeps it up,
 // off never shows it. It never says anything about evolution.
@@ -2668,22 +2832,23 @@ function placeOverlays() {
   } else bannerEl.classList.remove('show');
 
   if (now < bubbleUntil) {
-    // bubbleEl's own margin lifts it 62px above and 6px left of the point it's moved to
-    const w = bubbleEl.offsetWidth;
+    // (x, y) is the bubble's bottom-left corner; its thinking dots hang below that
+    const w = bubbleEl.offsetWidth, h = bubbleEl.offsetHeight;
     let x, y;
     if (card) {
-      x = card.right + 10 + w < innerWidth - M ? card.right + 16 : card.left - w - 4;
-      y = card.top + 62;
+      x = card.right + 10 + w < innerWidth - M ? card.right + 10 : card.left - w - 10;
+      y = card.top + h;
     } else {
-      [x, y] = toScreen(q.x + pet.hx * 0.4, q.y + pet.hy + 2);
+      const [hx2, hy2] = toScreen(q.x + pet.hx * 0.4, q.y + pet.hy + 2);
+      x = hx2 - 6; y = hy2 - 34;
     }
-    x = clamp(x, M + 6, innerWidth - w - M + 6);
-    y = Math.max(62 + M, y);
+    x = clamp(x, M, innerWidth - w - M);
+    y = Math.max(h + M, y);
     // follow the pet smoothly rather than copying every hop and bounce
     const k = bubblePos ? 1 - Math.exp(-Math.min(0.1, (now - bubbleAt) / 1000) * 7) : 1;
     bubblePos = bubblePos ? [bubblePos[0] + (x - bubblePos[0]) * k, bubblePos[1] + (y - bubblePos[1]) * k] : [x, y];
     bubbleAt = now;
-    bubbleEl.style.transform = `translate(${bubblePos[0].toFixed(1)}px, ${bubblePos[1].toFixed(1)}px)`;
+    bubbleEl.style.transform = `translate(${bubblePos[0].toFixed(1)}px, ${bubblePos[1].toFixed(1)}px) translateY(-100%)`;
   } else bubbleEl.classList.remove('show');
 }
 
@@ -2770,9 +2935,10 @@ function toScreen(x, y) {
 }
 const bubbleEl = document.getElementById('bubble');
 let bubbleUntil = 0;
-function showBubble(icon) {
+function showBubble(icon, speech = false) {
   bubbleEl.textContent = icon;
-  bubbleUntil = performance.now() + 2600;
+  bubbleEl.classList.toggle('say', speech);
+  bubbleUntil = performance.now() + (speech ? 4000 : 2600);
   bubblePos = null;   // place it before it shows, so it doesn't flash up where the last one was
   placeOverlays();
   bubbleEl.classList.remove('show'); void bubbleEl.offsetWidth; bubbleEl.classList.add('show');
@@ -2832,6 +2998,7 @@ function stepSim(dt) {
   pet.step(dt);
   stepEffects(dt);
   spoilFood(dt);
+  tickTalk(dt);
   world.step();
   // anything that escaped the walls comes back in from above
   for (const pr of [pet, ...props]) {
@@ -2886,6 +3053,7 @@ function frame(now) {
       `wants ${Object.entries(pet.scores).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + v.toFixed(2)).join('  ')}\n` +
       `traits ${TRAITS.map(k => k + ' ' + save.traits[k].toFixed(1)).join('  ')}\n` +
       (save.lineage.length ? `family ${save.lineage.map(l => `${l.name} (${l.form ?? '?'})`).join(' → ')}\n` : '') +
+      (CFG.talk ? `words ${vocabSize()} known, ${Object.keys(vocab().cand).length} heard${badWords ? '' : ' (bad-words list not loaded)'}\n` : '') +
       `props ${Object.entries(props.reduce((o, pr) => (o[pr.food ?? pr.kind] = (o[pr.food ?? pr.kind] ?? 0) + 1, o), {})).map(([k, v]) => k + ' ' + v).join('  ')}\n` +
       `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
   }
@@ -2985,6 +3153,7 @@ function pixelCog(N = 21, teeth = 8) {
       <textarea id="sp-io" spellcheck="false" placeholder="Export puts your pet here as text. To import, paste one here."></textarea>
       <div class="sp-row2"><button class="sp-btn sm" data-pet="export">Export</button><button class="sp-btn sm" data-pet="import">Import</button></div>
       <small>Keep a copy somewhere safe: clearing OBS's browser cache would lose it.</small></div>
+    <div class="sp-f"><button class="sp-btn sm warn" data-pet="forget">Forget every word it's learned…</button></div>
     <div class="sp-f"><button class="sp-btn sm warn" data-pet="reset">Start over with a new egg…</button></div>`;
   body.appendChild(petSec);
   const io = petSec.querySelector('#sp-io'), who = petSec.querySelector('.who');
@@ -3007,6 +3176,16 @@ function pixelCog(N = 21, teeth = 8) {
       msg.textContent = `Imported ${s.name ?? 'an egg'}! Reloading…`;
       importing = true;
       setTimeout(() => location.reload(), 300);
+    }
+    if (act === 'forget') {
+      if (e.target.dataset.armed !== '1') {
+        e.target.dataset.armed = '1'; e.target.textContent = `Really forget all ${vocabSize()} words? Click again`;
+        setTimeout(() => { e.target.dataset.armed = ''; e.target.textContent = 'Forget every word it\'s learned…'; }, 5000);
+        return;
+      }
+      save.vocab = { known: {}, cand: {} }; writeSave();
+      e.target.dataset.armed = ''; e.target.textContent = 'Forget every word it\'s learned…';
+      msg.textContent = 'All forgotten.';
     }
     if (act === 'reset') {
       if (!resetArmed) {
@@ -3036,7 +3215,7 @@ function pixelCog(N = 21, teeth = 8) {
   const open = () => {
     fill(SET);
     who.textContent = save.stage === 'egg' ? 'An egg, waiting to hatch.' :
-      `${save.name}, generation ${save.gen}, ${Math.round(ageHours())} hours old.`;
+      `${save.name}, generation ${save.gen}, ${Math.round(ageHours())} hours old${CFG.talk ? `, knows ${vocabSize()} words` : ''}.`;
     msg.textContent = storageOK ? '' : 'This browser source can\'t save settings — use "Copy setup link" instead.';
     linkBox.style.display = 'none';
     panel.classList.add('open');
@@ -3105,6 +3284,8 @@ window.pet = {
   follow: (name) => onFollow({ name }),
   feed(kind) { if (save.stage !== 'egg') dropFood(FOODS[kind] ? kind : undefined, spotNear(pet.pos().x, rand(-15, 15))); },
   play() { if (save.stage !== 'egg') startAction(pet, 'play'); },
+  say: (text) => say(text),
+  words: () => Object.keys(vocab().known).filter(w => w !== '^'),
   stats() { showStatus(6000); return { name: save.name, stage: save.stage, age: ageHours(), ...N, health: life.health }; },
   hop() { startAction(pet, 'wander'); },
   do(name) { if (ACTIONS[name]) startAction(pet, name); },
