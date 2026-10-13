@@ -46,6 +46,7 @@
     settle    seconds of simulation to run before the first frame (for screenshots)
     speed     life-clock speed: needs fall this many times faster (for testing)
     set       start needs for testing, e.g. set=hunger:10,energy:5
+    gross     chance it eats its poop instead of the broom sweeping it, 0-1 (default 0.05)
 
   Custom integrations (Streamer.bot, etc.) can call:
     window.pet.chat(name, text), .sub(name, count), .bits(name, amount), .raid(name, viewers), .follow(name),
@@ -1855,6 +1856,7 @@ function isNight() {
 // time. An action's step() returns true when it's finished; `cool` keeps it from being picked again
 // for that many seconds after it ends.
 const want = (v, from) => clamp((from - v) / from, 0, 1);
+const GROSS_CHANCE = num('gross', 0.05, 0, 1); // how often it eats its poop instead of letting the broom have it
 const findProp = (kind, near) => {
   let best = null, bd = Infinity;
   for (const p of props) {
@@ -2001,10 +2003,28 @@ const ACTIONS = {
     score: () => (findProp('poop', 0) ? 0.4 + want(N.hygiene, 60) * 0.5 : want(N.hygiene, 30) * 0.7),
     start(p, a) {
       a.poop = findProp('poop', p.pos().x);
-      if (a.poop) a.broom = sweepAway(a.poop);
+      // every so often it gets to the poop before the broom does, and eats it. Yuck. It'll be poorly
+      // for a bit, until the medicine kicks in.
+      if (a.poop && Math.random() < GROSS_CHANCE) a.gross = true;
+      else if (a.poop) a.broom = sweepAway(a.poop);
       a.shake = 0;
     },
     step(p, dt, a) {
+      if (a.gross) {
+        const pp = a.poop.pos(), px = p.pos().x;
+        if (a.poop.gone) return true;
+        if (!p.hopToward(pp.x + Math.sign(px - pp.x || 1) * (p.hx + 1.5), 1.2, dt) || !p.grounded) return a.t > 15;
+        p.face(Math.sign(pp.x - px));
+        p.sqV -= 2.2;
+        spawnBits(pp.x, pp.y + 0.5, [0x7a4f2a, 0x8d5c33], 8, { vy: 12, spread: 8, size: 0.45, life: 1.2 });
+        sfx('chomp');
+        a.poop.remove();
+        showBubble('🤢');
+        life.health = Math.min(life.health, 30);  // low enough to be sick, so the medicine comes
+        N.hygiene = clamp(N.hygiene - 20, 0, 100);
+        p.mood('sad', 3);
+        return true;
+      }
       if (a.poop) {
         p.face(Math.sign(a.poop.pos().x - p.pos().x));
         if (!a.broom.done) return false;
