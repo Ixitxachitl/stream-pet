@@ -128,7 +128,8 @@ how often it got to sleep through the night, how often it played. That's what dr
 
 ### Life stages
 Egg → Baby → Child → Teen → Adult → Elder. Growth is measured in **stream hours** (only while the
-source is visible) by default, so it grows with the channel. `agerate` scales this.
+source is visible) by default, so it grows with the channel. `agerate` scales this. Each stage ends at
+these ages: egg 5 minutes, baby 2 h, child 6 h, teen 15 h, adult 60 h, and the elder retires at 80 h.
 - Each stage swaps the model and scale, and gets a hatch/evolve cutscene (a burst of voxel shards).
 - The **teen** form comes from the pet's strongest trait so far (8 teen forms). The **adult** form is
   one of hundreds (see §5a). The **elder** keeps the adult form, a bit greyer and slower.

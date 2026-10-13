@@ -13,8 +13,12 @@
     size      adult height on screen in px (default 160)
     ground    floor height in px from the bottom (default 0)
     xmin/xmax left/right walls in % of the width (default 0/100)
-    seed      look of the pet (colours, pattern); random if not given
-    stage     egg, baby, child or adult (default baby, until the life cycle exists)
+    seed      test with a throwaway pet with this look (colours, pattern)
+    stage     test with a throwaway pet at this stage: egg, baby, child, teen, adult or elder
+    slot      name of the save slot, to run more than one pet (default main)
+    reset     1 = start over with a new egg
+    name      the pet's name (default: a generated one)
+    agerate   how much faster it grows up (for testing)
     ball      1 = drop a ball in to play with
     drop      things to drop in at the start, for testing: drop=apple,fish,cookie,cake,poop,ball
     debug     1 = collider wireframes + a status readout
@@ -39,6 +43,10 @@
   #bubble::after{content:"";position:absolute;left:12px;bottom:-9px;width:14px;height:14px;background:#fff;
     border-radius:50%;box-shadow:-8px 10px 0 -3px #fff}
   @keyframes pop{from{scale:.3}to{scale:1}}
+  #banner{position:fixed;transform:translate(-50%,-100%);padding:8px 18px;border-radius:14px;background:#fff;
+    color:#2a1f44;font:700 26px/1.2 "Comic Neue","Comic Sans MS",sans-serif;white-space:nowrap;pointer-events:none;
+    box-shadow:0 4px 14px #0005;opacity:0;transition:opacity .4s}
+  #banner.show{opacity:1;animation:pop .45s cubic-bezier(.3,1.6,.5,1)}
   .float{position:fixed;pointer-events:none;font:700 22px/1 "Comic Neue","Comic Sans MS",sans-serif;
     animation:floatUp 2.5s ease-out forwards}
   .float.zzz{color:#e8f0ff;text-shadow:0 2px 4px #0006}
@@ -57,6 +65,7 @@
 <body>
 <div id="hud"></div>
 <div id="bubble"></div>
+<div id="banner"></div>
 <script type="module">
 import * as THREE from 'three';
 import RAPIER from 'rapier';
@@ -73,7 +82,7 @@ const CFG = {
   xmin: num('xmin', 0, 0, 100),
   xmax: num('xmax', 100, 0, 100),
   seed: Q.get('seed') || String(Math.floor(Math.random() * 1e9)),
-  stage: ['egg', 'baby', 'child', 'adult'].includes(Q.get('stage')) ? Q.get('stage') : 'baby',
+  name: (Q.get('name') || '').slice(0, 24),
   ball: Q.get('ball') === '1',
   debug: Q.get('debug') === '1',
   speed: num('speed', 1, 0.1, 3600),
@@ -108,6 +117,54 @@ function rngFrom(seed) {
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---------------- save ----------------
+// One pet per slot, kept in this browser source's local storage. ?slot= runs a separate pet, ?reset=1
+// starts over. Test runs (?stage= or ?seed= given) build a throwaway pet and never touch the save.
+const SAVE_KEY = 'streampet.v1.' + (Q.get('slot') || 'main');
+const TESTING = Q.has('stage') || Q.has('seed');
+const TRAITS = ['fed', 'rested', 'playful', 'social', 'hyped', 'calm', 'nightowl', 'generous'];
+
+function newSave(seed, parent) {
+  return {
+    v: 1, seed: String(seed), gen: parent ? parent.gen + 1 : 1,
+    // a hatchling keeps roughly its parent's colouring
+    hue: parent ? ((parent.hue ?? makePalette(parent.seed).hue) + (Math.random() - 0.5) * 0.16 + 1) % 1 : null,
+    name: null, stage: 'egg', age: 0, born: Date.now(), lastSeen: Date.now(),
+    needs: { hunger: 75, energy: 85, fun: 65, hygiene: 95, social: 60 }, health: 100, digestAt: 0, t: 0,
+    traits: Object.fromEntries(TRAITS.map(k => [k, 0])),
+    tod: [0, 0, 0, 0],                       // visible hours by time of day: night, morning, afternoon, evening
+    events: { chat: 0, chatters: 0, raids: 0, subs: 0, bits: 0 },
+    hatchMonth: null, teen: null, form: null, formName: null,
+    lineage: parent ? [...parent.lineage] : [],
+  };
+}
+function loadSave() {
+  if (TESTING) {
+    const s = newSave(CFG.seed);
+    s.stage = ['egg', 'baby', 'child', 'teen', 'adult', 'elder'].includes(Q.get('stage')) ? Q.get('stage') : 'baby';
+    s.name = CFG.name || 'Test';
+    return s;
+  }
+  try {
+    if (Q.get('reset') === '1') localStorage.removeItem(SAVE_KEY);
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+    if (s && s.v === 1 && s.needs && s.traits) return s;
+  } catch (e) {}
+  return newSave(Math.floor(Math.random() * 1e9));
+}
+function writeSave() {
+  if (TESTING) return;
+  save.lastSeen = Date.now();
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {}
+}
+const save = loadSave();
+// Swap in a different save (a new generation) without breaking references to save / save.needs.
+function replaceSave(next) {
+  const needs = Object.assign(save.needs, next.needs);
+  for (const k of Object.keys(save)) delete save[k];
+  Object.assign(save, next, { needs });
+}
 
 // ---------------- voxels ----------------
 // A sparse voxel grid. Colours are sRGB hex numbers.
@@ -221,9 +278,10 @@ function voxMesh(vox, { layer = LAYER.body } = {}) {
 
 // ---------------- the critter ----------------
 // Colours and pattern come from the seed. Shapes come from the stage (and later, the adult form).
-function makePalette(seed) {
+function makePalette(seed, hue) {
   const r = rngFrom(hashStr('pal:' + seed));
-  const h = r();
+  const h = hue ?? r();
+  if (hue != null) r(); // keep the rest of the sequence the same either way
   const hsl = (hh, s, l) => new THREE.Color().setHSL(((hh % 1) + 1) % 1, s, l, THREE.SRGBColorSpace).getHex(THREE.SRGBColorSpace);
   const accentShift = [0.5, 0.42, 0.58, 0.08, -0.08][Math.floor(r() * 5)];
   return {
@@ -237,6 +295,7 @@ function makePalette(seed) {
     shell: hsl(h + 0.1, 0.35, 0.9),
     pattern: ['none', 'spots', 'stripes', 'socks'][Math.floor(r() * 4)],
     patternSeed: Math.floor(r() * 1e9),
+    hue: h,
   };
 }
 
@@ -249,6 +308,8 @@ const STAGES = {
   baby:  { body: { type: 'round', w: 7, h: 6, d: 6 }, ears: { type: 'nub', len: 1 }, feet: { type: 'stubby' },
            eyes: 'round', mouth: 'dot' },
   child: { body: { type: 'round', w: 8, h: 7, d: 7 }, ears: { type: 'nub', len: 2 }, tail: { type: 'curl', len: 2 },
+           feet: { type: 'stubby' }, eyes: 'round', mouth: 'dot' },
+  teen:  { body: { type: 'round', w: 9, h: 8, d: 7 }, ears: { type: 'point', len: 2 }, tail: { type: 'curl', len: 3 },
            feet: { type: 'stubby' }, eyes: 'round', mouth: 'dot' },
   adult: { body: { type: 'round', w: 10, h: 8, d: 8 }, ears: { type: 'point', len: 3 }, tail: { type: 'curl', len: 4 },
            feet: { type: 'stubby' }, eyes: 'round', mouth: 'dot' },
@@ -368,6 +429,23 @@ function motionFor(recipe) {
   return { hopV: 12 + 2.5 * h, hopS: 7 + w, upright: 20 * h - 30 };
 }
 
+// An egg: round slices, widest a bit below the middle, with spots.
+function eggVox(S, pal) {
+  const vox = new Vox(), r = rngFrom(pal.patternSeed);
+  const spots = Array.from({ length: 9 }, () => [r() * 2 * Math.PI, 0.12 + r() * 0.66]);
+  for (let y = 0; y < S.h; y++) {
+    const t = (y + 0.5) / S.h * 2 - 1;
+    const rad = S.w / 2 * Math.pow(Math.max(0, 1 - t * t), 0.6) * (1 - 0.2 * t) + 0.2;
+    for (let x = -S.w; x < S.w; x++) for (let z = -S.d; z < S.d; z++) {
+      if (Math.hypot(x + 0.5, z + 0.5) > rad) continue;
+      const ang = Math.atan2(z + 0.5, x + 0.5), ty = (y + 0.5) / S.h;
+      const spot = spots.some(([a, sy]) => Math.abs(wrapAngle(ang - a)) * 1.6 + Math.abs(ty - sy) * 6 < 0.5);
+      vox.set(x, y, z, spot ? pal.accent : pal.shell);
+    }
+  }
+  return vox;
+}
+
 function buildCritter(recipe, pal) {
   const RB = recipe.body;
   const S = { w: RB.w, h: RB.h, d: RB.d, foot: 0, egg: RB.type === 'egg', ...motionFor(recipe) };
@@ -380,20 +458,7 @@ function buildCritter(recipe, pal) {
   };
 
   if (S.egg) {
-    // round slices, widest a bit below the middle
-    const vox = new Vox(), r = rngFrom(pal.patternSeed);
-    const spots = Array.from({ length: 9 }, () => [r() * 2 * Math.PI, 0.12 + r() * 0.66]);
-    for (let y = 0; y < S.h; y++) {
-      const t = (y + 0.5) / S.h * 2 - 1;
-      const rad = S.w / 2 * Math.pow(Math.max(0, 1 - t * t), 0.6) * (1 - 0.2 * t) + 0.2;
-      for (let x = -S.w; x < S.w; x++) for (let z = -S.d; z < S.d; z++) {
-        if (Math.hypot(x + 0.5, z + 0.5) > rad) continue;
-        const ang = Math.atan2(z + 0.5, x + 0.5), ty = (y + 0.5) / S.h;
-        const spot = spots.some(([a, sy]) => Math.abs(wrapAngle(ang - a)) * 1.6 + Math.abs(ty - sy) * 6 < 0.5);
-        vox.set(x, y, z, spot ? pal.accent : pal.shell);
-      }
-    }
-    squash.add(voxMesh(vox));
+    squash.add(voxMesh(eggVox(S, pal)));
     return parts;
   }
 
@@ -536,7 +601,7 @@ const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
 // Collision groups: crumbs and other bits never touch Rapier, everything else sorts itself out here.
-const G = { WORLD: 1, PET: 2, PROP: 4 };
+const G = { WORLD: 1, PET: 2, PROP: 4, WALL: 8 };
 const groups = (member, filter) => (member << 16) | filter;
 let walls = [];
 const B = { left: -50, right: 50 };  // current walls, in voxels
@@ -559,13 +624,13 @@ function layout() {
 
   // bodies can't leave z = 0, so only a floor and two side walls are needed
   for (const c of walls) world.removeCollider(c, false);
-  const wall = (x, y, hx, hy) => world.createCollider(
+  const wall = (x, y, hx, hy, g) => world.createCollider(
     RAPIER.ColliderDesc.cuboid(hx, hy, 20).setTranslation(x, y, 0).setFriction(0.8)
-      .setCollisionGroups(groups(G.WORLD, 0xffff)), ground);
+      .setCollisionGroups(groups(g, 0xffff)), ground);
   walls = [
-    wall(cx, -5, span / 2 + 50, 5),       // floor
-    wall(B.left - 5, 60, 5, 80),          // left
-    wall(B.right + 5, 60, 5, 80),         // right
+    wall(cx, -5, span / 2 + 80, 5, G.WORLD),  // floor (runs on past the walls, for a pet that's leaving)
+    wall(B.left - 5, 60, 5, 80, G.WALL),      // left
+    wall(B.right + 5, 60, 5, 80, G.WALL),     // right
   ];
 }
 layout();
@@ -574,7 +639,7 @@ addEventListener('resize', layout);
 const screenTop = () => (innerHeight - CFG.ground) / PX - 0.6;
 
 // ---------------- the pet ----------------
-const pal = makePalette(CFG.seed);
+let pal = palFor(save);
 const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3();
 // bodies only rotate about z (in the screen plane), so this is the whole rotation
 const rollOf = (q) => wrapAngle(2 * Math.atan2(q.z, q.w));
@@ -597,10 +662,11 @@ class Pet {
       .setAngularDamping(1.5).setCcdEnabled(true));
     world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
       .setDensity(1).setFriction(0.9).setRestitution(0.05)
-      .setCollisionGroups(groups(G.PET, G.WORLD | G.PROP)), this.body);
+      .setCollisionGroups(groups(G.PET, G.WORLD | G.WALL | G.PROP)), this.body);
     this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
     this.action = null; this.rethink = 0; this.scores = {}; this.cool = {}; this.timer = rand(0.5, 1.5);
     this.asleep = false; this.poseSq = 0; this.speedUp = 1; this.roll = 0;
+    this.frozen = false; this.spin = 0; this.leaving = false;  // cutscenes
     this.facing = 0;            // -1 left, 0 toward the camera, 1 right
     this.yaw = 0; this.yawV = 0;
     this.grounded = false; this.dazed = 0; this.crouch = 0;
@@ -658,7 +724,7 @@ class Pet {
     if (S.egg) return this.eggStep(dt);
 
     this.roll = roll;
-    brainStep(this, dt);
+    if (!this.frozen) brainStep(this, dt);
     if (this.moodT > 0 && (this.moodT -= dt) <= 0) this.expr = 'open';
   }
 
@@ -730,7 +796,7 @@ class Pet {
         t.a = clamp(t.a + t.v * h, -1, 1);
       }
     }
-    V.squash.rotation.y = this.yaw;
+    V.squash.rotation.y = this.yaw + this.spin;
     const sy = 1 + this.sq, sxz = 1 / Math.sqrt(sy);
     V.squash.scale.set(sxz, sy, sxz);
     for (const e of V.ears) e.g.rotation.z = e.a;
@@ -771,7 +837,7 @@ class Prop {
     this.r = shape === 'ball' ? Math.max(sx, sy) / 2 * 0.92 : sy / 2;
     const cd = shape === 'ball' ? RAPIER.ColliderDesc.ball(this.r) : RAPIER.ColliderDesc.cuboid(sx / 2, sy / 2, sz / 2);
     world.createCollider(cd.setDensity(density).setRestitution(restitution).setFriction(friction)
-      .setCollisionGroups(groups(G.PROP, G.WORLD | G.PET | G.PROP)), this.body);
+      .setCollisionGroups(groups(G.PROP, G.WORLD | G.WALL | G.PET | G.PROP)), this.body);
     this.halfH = sy / 2;
     props.push(this);
   }
@@ -953,12 +1019,9 @@ const SPARKLE = [0xffffff, 0xfff3a0, 0xa8f0ff];
 // ---------------- life: needs ----------------
 // Needs run from 0 (desperate) to 100 (perfectly happy) and fall over time. The overlay is the
 // caretaker, so the brain always finds a way to fix them; how well that goes shapes it later.
-const life = {
-  needs: { hunger: 75, energy: 85, fun: 65, hygiene: 95, social: 60 },
-  health: 100,
-  digestAt: 0,  // life-clock time the next poop is due (0 = nothing to digest)
-  t: 0,         // life clock in seconds (runs at ?speed)
-};
+// The live state is the save itself: needs, health, digestAt (life-clock time the next poop is due,
+// 0 = nothing to digest) and t (the life clock in seconds, which runs at ?speed).
+const life = save;
 const N = life.needs;
 const DECAY = { hunger: 40, energy: 22, fun: 55, hygiene: 6, social: 35 }; // points per hour, awake
 for (const kv of (Q.get('set') || '').split(',')) {        // ?set=hunger:10,energy:5 for testing
@@ -1206,6 +1269,187 @@ function startAction(p, name) {
   if (def.bubble) showBubble(def.bubble);
 }
 
+// ---------------- life cycle ----------------
+// It grows by hours on screen (only while the source is visible), so it grows up with the channel.
+// AGES is the age, in hours, at which each stage ends. ?agerate= speeds this up for testing.
+const AGES = { egg: 5 / 60, baby: 2, child: 6, teen: 15, adult: 60, elder: 80 };
+const NEXT = { egg: 'baby', baby: 'child', child: 'teen', teen: 'adult', adult: 'elder' };
+const AGERATE = num('agerate', 1, 0.01, 1e6);
+const ageHours = () => save.age / 3600;
+
+function recipeFor(stage) {
+  if (stage === 'teen') return save.teen ?? STAGES.teen;
+  if (stage === 'adult' || stage === 'elder') return save.form ?? STAGES.adult;
+  return STAGES[stage];
+}
+// Placeholders until the form generator: one teen and one adult form.
+function chooseTeen() { return STAGES.teen; }
+function chooseAdult() { return { recipe: STAGES.adult, name: 'Critter' }; }
+
+// Elders go a little grey.
+function palFor(s) {
+  const p = makePalette(s.seed, s.hue);
+  if (s.stage !== 'elder') return p;
+  const grey = (hex) => {
+    const c = new THREE.Color().setHex(hex, THREE.SRGBColorSpace), hsl = {};
+    c.getHSL(hsl, THREE.SRGBColorSpace);
+    return c.setHSL(hsl.h, hsl.s * 0.55, Math.min(0.92, hsl.l + 0.06), THREE.SRGBColorSpace).getHex(THREE.SRGBColorSpace);
+  };
+  for (const k of ['body', 'belly', 'accent', 'dark']) p[k] = grey(p[k]);
+  return p;
+}
+
+// Cute generated names: two syllables and maybe an ending.
+function makeName(seed) {
+  const r = rngFrom(hashStr('name:' + seed)), pick = (a) => a[Math.floor(r() * a.length)];
+  const A = ['Bo', 'Mi', 'Pip', 'Lu', 'Ka', 'Zu', 'Nim', 'Fi', 'To', 'Ra', 'Po', 'Chi', 'Mo', 'Bea', 'Dot', 'Wix', 'Pa', 'Nu', 'Ki', 'Sa', 'Gum', 'Tib'];
+  const Bs = ['bo', 'mi', 'pi', 'lu', 'ka', 'zu', 'ni', 'fi', 'to', 'chi', 'mo', 'ri', 'pu', 'do', 'ki', 'sy'];
+  const E = ['', '', '', 'n', 'bit', 'ble', 'kin', 'p', 'o', 'y'];
+  return pick(A) + (r() < 0.7 ? pick(Bs) : '') + pick(E);
+}
+
+// Traits build up from how its life is going, an hour at a time. Chat and stream events add to them
+// directly as they happen.
+function tickAge(dt) {
+  const h = dt * CFG.speed * AGERATE / 3600;
+  save.age += h * 3600;
+  if (save.stage !== 'egg') {
+    const T = save.traits, act = pet.action?.name, hour = new Date().getHours();
+    if (N.hunger > 60) T.fed += h;
+    if (pet.asleep) T.rested += isNight() ? 2 * h : h;
+    if (act === 'play' || act === 'zoomies') T.playful += 3 * h;
+    if (N.social > 60) T.social += h;
+    if (save.t - (life.lastChat ?? -1e9) > 300 * CFG.speed) T.calm += h;
+    if (hour >= 22 || hour < 4) T.nightowl += h;
+    save.tod[Math.floor(hour / 6)] += h;
+  }
+  if (!cutscene && NEXT[save.stage] && ageHours() >= AGES[save.stage]) evolve(NEXT[save.stage]);
+}
+
+// ---- hatching and evolving ----
+let cutscene = null;
+function evolve(next) {
+  const from = save.stage;
+  if (next === 'baby') { save.hatchMonth = new Date().getMonth(); save.name ??= CFG.name || makeName(save.seed); }
+  if (next === 'teen') save.teen = chooseTeen();
+  if (next === 'adult') { const f = chooseAdult(); save.form = f.recipe; save.formName = f.name; }
+  save.stage = next;
+  writeSave();
+  if (pet.action) { pet.action.def.end?.(pet, pet.action); pet.action = null; }
+  pet.frozen = true;
+  cutscene = { t: 0, from, next, swapped: false, shake: 0 };
+}
+function stepCutscene(dt) {
+  const c = cutscene, hatch = c.from === 'egg', q = pet.pos();
+  c.t += dt;
+  if (!c.swapped) {
+    if (hatch) {
+      // rocks harder and harder, with bits of shell flying
+      if ((c.shake -= dt) <= 0) {
+        c.shake = Math.max(0.08, 0.3 - c.t * 0.15);
+        pet.body.applyTorqueImpulse({ x: 0, y: 0, z: pet.inertia * (Math.random() < 0.5 ? -1 : 1) * (1 + c.t * 2) }, true);
+        spawnBits(q.x, q.y + pet.hy * 0.5, [pal.shell, pal.accent], 2, { vy: 14, spread: 10, size: 0.45, life: 1.2 });
+      }
+    } else if (Math.random() < 0.5) {
+      spawnBits(q.x + rand(-pet.hx, pet.hx), q.y + rand(-pet.hy, pet.hy), SPARKLE, 1, { vy: 6, spread: 6, size: 0.4, life: 1, grav: 0 });
+    }
+    if (c.t >= (hatch ? 2.2 : 1.4)) {
+      // the swap: the new body pops out of a burst
+      const oldPal = pal;
+      pal = palFor(save);
+      pet.build(recipeFor(c.next), c.next, q.x, q.y + 1);
+      pet.frozen = true;
+      pet.body.applyImpulse({ x: 0, y: pet.body.mass() * 25, z: 0 }, true);
+      spawnBits(q.x, q.y, hatch ? [oldPal.shell, oldPal.accent] : [pal.body, pal.accent, ...SPARKLE], hatch ? 30 : 40,
+        { vy: 20, spread: 18, size: 0.5, life: 1.8, grav: hatch ? 1 : 0.15 });
+      c.swapped = true;
+      showBanner(
+        hatch ? `Hatched! Say hi to ${save.name}` :
+        c.next === 'adult' ? `${save.name} became ${/^[aeiou]/i.test(save.formName) ? 'an' : 'a'} ${save.formName}!` :
+        c.next === 'elder' ? `${save.name} is all grown old` : `${save.name} is growing up!`);
+    }
+  } else if (c.t >= (hatch ? 3.6 : 2.8)) {
+    cutscene = null;
+    pet.frozen = false;
+    pet.mood('happy', 2);
+  }
+  // evolving spins it: six full turns, eased in and out, so it ends facing the camera again
+  if (!hatch) pet.spin = Math.PI * 2 * 6 * (c.t >= 2.8 ? 1 : (1 - Math.cos(Math.PI * c.t / 2.8)) / 2);
+}
+
+// ---- retiring: the elder lays an egg, waves goodbye and leaves ----
+ACTIONS.retire = {
+  minTime: 1e9,
+  score: () => (save.stage === 'elder' && ageHours() >= AGES.elder && !cutscene ? 5 : 0),
+  start(p, a) { p.face(0); p.expr = 'happy'; showBanner(`${save.name} is off on an adventure! 💛`); },
+  step(p, dt, a) {
+    const q = p.pos();
+    if (a.t < 2.5) {                       // wave
+      for (const e of p.vis.ears) e.v += Math.sin(a.t * 14) * 40 * dt * e.side;
+      return false;
+    }
+    if (!a.egg) {                           // lay the egg
+      a.child = newSave(Math.floor(Math.random() * 1e9), save);
+      const childPal = makePalette(a.child.seed, a.child.hue);
+      const side = q.x > (B.left + B.right) / 2 ? -1 : 1;
+      a.egg = new Prop('egg', eggVox(STAGES.egg.body, childPal), { x: clamp(q.x + side * (p.hx + 5), B.left + 6, B.right - 6), y: 6, density: 0.5, restitution: 0.1 });
+      spawnBits(a.egg.pos().x, 4, SPARKLE, 16, { vy: 10, spread: 12, size: 0.45, life: 1.4, grav: 0 });
+      a.exit = side > 0 ? B.left - 30 : B.right + 30;   // leave the other way
+      return false;
+    }
+    if (a.t < 4.5) { p.face(Math.sign(a.egg.pos().x - q.x)); return false; } // a last look
+    if (!p.leaving) {
+      p.leaving = true;
+      p.body.collider(0).setCollisionGroups(groups(G.PET, G.WORLD | G.PROP)); // through the side walls
+      p.expr = 'open';
+    }
+    p.hopToward(a.exit, 2, dt);
+    if (Math.abs(q.x - a.exit) > 12) return false;
+    // gone: the egg becomes the new pet
+    save.lineage.push({ name: save.name, form: save.formName, gen: save.gen, born: save.born, retired: Date.now() });
+    const ex = a.egg.pos().x;
+    a.egg.remove();
+    replaceSave(a.child);
+    writeSave();
+    pal = palFor(save);
+    p.build(recipeFor('egg'), 'egg', ex, 6);
+    showBanner('A new egg!');
+    return true;
+  },
+};
+
+// ---- time away ----
+// While the overlay was closed (or hidden) the pet carried on without anyone watching: it ate from
+// the dispenser, slept, and got a little bored and lonely. It never comes back in a bad way, and it
+// doesn't age, since age only counts time on screen.
+function catchUp(seconds) {
+  if (seconds < 60 || save.stage === 'egg') return;
+  const hrs = Math.min(seconds, 3 * 86400) / 3600;
+  N.hunger = clamp(Math.max(N.hunger, rand(55, 75)), 0, 100);
+  N.energy = clamp(Math.max(N.energy, rand(80, 95)), 0, 100);
+  N.fun = clamp(N.fun - Math.min(30, hrs * 10), 35, 100);
+  N.social = clamp(N.social - Math.min(40, hrs * 15), 25, 100);
+  N.hygiene = clamp(Math.max(N.hygiene, 80), 0, 100);
+  save.health = Math.max(save.health, 80);
+  save.digestAt = 0;
+  if (hrs > 1 && Math.random() < 0.6) dropPoop(rand(B.left + 10, B.right - 10), 2); // a little welcome-back chore
+}
+
+// ---- banner: big text over the pet for the big moments ----
+const bannerEl = document.getElementById('banner');
+let bannerUntil = 0;
+function showBanner(text) {
+  bannerEl.textContent = text;
+  bannerEl.classList.remove('show'); void bannerEl.offsetWidth; bannerEl.classList.add('show');
+  bannerUntil = performance.now() + 4500;
+}
+function placeBanner() {
+  if (performance.now() > bannerUntil) { bannerEl.classList.remove('show'); return; }
+  const q = pet.pos(), [sx, sy] = toScreen(q.x, q.y + pet.hy + 8);
+  bannerEl.style.left = clamp(sx, 160, innerWidth - 160) + 'px';
+  bannerEl.style.top = Math.max(40, sy) + 'px';
+}
+
 // ---------------- broom ----------------
 // The auto-clean: a little broom drops in next to the poop, sweeps a few times and it's gone.
 const effects = [];
@@ -1270,8 +1514,14 @@ function floatText(x, y, text, cls) {
 }
 
 // ---------------- loop ----------------
-const pet = new Pet(STAGES[CFG.stage], CFG.stage, (B.left + B.right) / 2);
+let pet = new Pet(recipeFor(save.stage), save.stage, (B.left + B.right) / 2);
 placeBed(B.left + 14);
+if (!TESTING) {
+  catchUp((Date.now() - save.lastSeen) / 1000);
+  writeSave();
+  setInterval(writeSave, 30000);
+  addEventListener('pagehide', writeSave);
+}
 if (CFG.ball) dropBall();
 function dropThing(kind = 'ball') {
   if (kind === 'ball') dropBall();
@@ -1291,12 +1541,14 @@ const hud = document.getElementById('hud');
 
 function stepSim(dt) {
   if (!pet.S.egg) tickLife(dt);
+  tickAge(dt);
+  if (cutscene) stepCutscene(dt);
   pet.step(dt);
   stepEffects(dt);
   world.step();
   // anything that escaped the walls comes back in from above
   for (const pr of [pet, ...props]) {
-    if (pr.body.isFixed()) continue;
+    if (pr.body.isFixed() || pr.leaving) continue;
     const p = pr.body.translation();
     if (p.y < -30 || p.x < B.left - 5 || p.x > B.right + 5) {
       pr.body.setTranslation({ x: clamp(p.x, B.left + 8, B.right - 8), y: 40, z: 0 }, true);
@@ -1308,10 +1560,12 @@ function stepSim(dt) {
 // ?settle=N runs N seconds of simulation up front (screenshots, headless tests)
 for (let i = 0, n = num('settle', 0, 0, 600) / STEP; i < n; i++) { stepSim(STEP); if (i % 4 === 0) pet.update(STEP * 4); }
 
-let hidden = document.hidden, last = performance.now(), acc = 0, fps = 0;
+let hidden = document.hidden, hiddenAt = Date.now(), last = performance.now(), acc = 0, fps = 0;
 function setHidden(h) {
+  if (h === hidden) return;
   hidden = h;
-  // the time spent hidden goes to the life simulation later, never to the physics
+  // time spent hidden goes to the life simulation as time away, never to the physics
+  if (h) { hiddenAt = Date.now(); writeSave(); } else catchUp((Date.now() - hiddenAt) / 1000);
   last = performance.now(); acc = 0;
 }
 document.addEventListener('visibilitychange', () => setHidden(document.hidden));
@@ -1332,16 +1586,18 @@ function frame(now) {
   for (const pr of props) pr.update();
   updateBits(dt);
   placeBubble();
+  placeBanner();
   if (debugLines) {
     const { vertices, colors } = world.debugRender();
     debugLines.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
     debugLines.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
     const p = pet.pos();
     hud.textContent = `fps ${fps.toFixed(0)}\n` +
-      `stage ${pet.stage}  seed ${CFG.seed}  pattern ${pal.pattern}\n` +
+      `${save.name ?? '(egg)'}  gen ${save.gen}  ${save.stage}  age ${ageHours().toFixed(2)}h  form ${save.formName ?? '-'}  seed ${save.seed}  pattern ${pal.pattern}${TESTING ? '  (test, not saved)' : ''}\n` +
       `action ${pet.action?.name}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}  asleep ${pet.asleep}\n` +
       `needs ${Object.entries(N).map(([k, v]) => k + ' ' + v.toFixed(0)).join('  ')}  health ${life.health.toFixed(0)}\n` +
       `wants ${Object.entries(pet.scores).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + v.toFixed(2)).join('  ')}\n` +
+      `traits ${TRAITS.map(k => k + ' ' + save.traits[k].toFixed(1)).join('  ')}\n` +
       `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
   }
   renderer.render(scene, cam);
@@ -1361,6 +1617,8 @@ window.pet = {
   },
   drop: dropThing,
   stage(s) { if (STAGES[s]) { const p = pet.pos(); pet.build(STAGES[s], s, p.x, p.y + 6); } },
+  evolve() { if (NEXT[save.stage] && !cutscene) evolve(NEXT[save.stage]); },
+  save: () => JSON.parse(JSON.stringify(save)),
   expr(e) { pet.expr = e; },
 };
 </script>
