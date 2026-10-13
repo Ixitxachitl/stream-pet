@@ -72,6 +72,7 @@
   #bubble::after{content:"";position:absolute;left:12px;bottom:-9px;width:14px;height:14px;background:#fff;
     border-radius:50%;box-shadow:-8px 10px 0 -3px #fff}
   @keyframes pop{from{scale:.3}to{scale:1}}
+  #bubble{transform-origin:20% 100%} #banner{transform-origin:50% 100%} /* pop up from where they sit */
   #banner{position:fixed;transform:translate(-50%,-100%);padding:8px 18px;border-radius:14px;background:#fff;
     color:#2a1f44;font:700 26px/1.2 "Comic Neue","Comic Sans MS",sans-serif;white-space:nowrap;pointer-events:none;
     box-shadow:0 4px 14px #0005;opacity:0;transition:opacity .4s}
@@ -2271,12 +2272,6 @@ function showBanner(text) {
   bannerEl.classList.remove('show'); void bannerEl.offsetWidth; bannerEl.classList.add('show');
   bannerUntil = performance.now() + 4500;
 }
-function placeBanner() {
-  if (performance.now() > bannerUntil) { bannerEl.classList.remove('show'); return; }
-  const q = pet.pos(), [sx, sy] = toScreen(q.x, q.y + pet.hy + 8);
-  bannerEl.style.left = clamp(sx, 160, innerWidth - 160) + 'px';
-  bannerEl.style.top = Math.max(40, sy) + 'px';
-}
 
 // ---------------- chat and stream events ----------------
 // Everything chat does is passive: it fills the social need, shapes traits, and gets reactions. The
@@ -2564,21 +2559,56 @@ const statusEl = document.getElementById('status');
 let statusUntil = CFG.status === 'always' ? Infinity : 0, statusTick = 0;
 function showStatus(ms = 6000) { if (CFG.status !== 'off') statusUntil = Math.max(statusUntil, performance.now() + ms); }
 const STAGE_NAMES = { egg: 'Egg', baby: 'Baby', child: 'Child', teen: 'Teen', adult: 'Adult', elder: 'Elder' };
-function placeStatus() {
-  const on = performance.now() < statusUntil;
-  statusEl.classList.toggle('show', on);
-  if (!on) return;
-  if (performance.now() > statusTick) {
-    statusTick = performance.now() + 500;
-    const age = ageHours(), ageTxt = age < 1 ? Math.round(age * 60) + ' min' : age.toFixed(age < 10 ? 1 : 0) + ' h';
-    statusEl.querySelector('.n').textContent = save.name ?? 'Egg';
-    statusEl.querySelector('.s').textContent = `${save.stage === 'adult' || save.stage === 'elder' ? save.formName + ' · ' : ''}${STAGE_NAMES[save.stage]} · ${ageTxt}`;
-    statusEl.querySelector('.bars').style.display = save.stage === 'egg' ? 'none' : '';
-    for (const [k, v] of Object.entries(N)) statusEl.querySelector(`[data-k="${k}"] i`).style.width = v.toFixed(0) + '%';
+function updateStatusText() {
+  if (performance.now() < statusTick) return;
+  statusTick = performance.now() + 500;
+  const age = ageHours(), ageTxt = age < 1 ? Math.round(age * 60) + ' min' : age.toFixed(age < 10 ? 1 : 0) + ' h';
+  statusEl.querySelector('.n').textContent = save.name ?? 'Egg';
+  statusEl.querySelector('.s').textContent = `${save.stage === 'adult' || save.stage === 'elder' ? save.formName + ' · ' : ''}${STAGE_NAMES[save.stage]} · ${ageTxt}`;
+  statusEl.querySelector('.bars').style.display = save.stage === 'egg' ? 'none' : '';
+  for (const [k, v] of Object.entries(N)) statusEl.querySelector(`[data-k="${k}"] i`).style.width = v.toFixed(0) + '%';
+}
+
+// The status card, the banner and the thought bubble all live over the pet's head, so they're laid
+// out together instead of on top of each other: the card sits just above the head, the banner above
+// the card, and the bubble beside the card (or over the head when there's no card). Everything is
+// kept on screen.
+function placeOverlays() {
+  const now = performance.now(), q = pet.pos(), M = 8;
+  const [hx, hy] = toScreen(q.x, q.y + pet.hy + 1.5);
+  let top = hy, card = null;
+
+  const statusOn = now < statusUntil;
+  statusEl.classList.toggle('show', statusOn);
+  if (statusOn) {
+    updateStatusText();
+    const w = statusEl.offsetWidth, h = statusEl.offsetHeight;
+    const cx = clamp(hx, w / 2 + M, innerWidth - w / 2 - M), bottom = Math.max(h + M, top);
+    statusEl.style.left = cx + 'px';
+    statusEl.style.top = bottom + 'px';
+    card = { left: cx - w / 2, right: cx + w / 2, top: bottom - h };
+    top = card.top - 10;
   }
-  const q = pet.pos(), [sx, sy] = toScreen(q.x, q.y + pet.hy + 2.5);
-  statusEl.style.left = clamp(sx, 110, innerWidth - 110) + 'px';
-  statusEl.style.top = Math.max(110, sy) + 'px';
+
+  if (now < bannerUntil) {
+    const w = bannerEl.offsetWidth, h = bannerEl.offsetHeight, bottom = Math.max(h + M, top);
+    bannerEl.style.left = clamp(hx, w / 2 + M, innerWidth - w / 2 - M) + 'px';
+    bannerEl.style.top = bottom + 'px';
+  } else bannerEl.classList.remove('show');
+
+  if (now < bubbleUntil) {
+    // bubbleEl's own margin lifts it 62px above and 6px left of the point it's moved to
+    const w = bubbleEl.offsetWidth;
+    let x, y;
+    if (card) {
+      x = card.right + 10 + w < innerWidth - M ? card.right + 16 : card.left - w - 4;
+      y = card.top + 62;
+    } else {
+      [x, y] = toScreen(q.x + pet.hx * 0.4, q.y + pet.hy + 2);
+    }
+    x = clamp(x, M + 6, innerWidth - w - M + 6);
+    bubbleEl.style.transform = `translate(${x.toFixed(1)}px, ${Math.max(62 + M, y).toFixed(1)}px)`;
+  } else bubbleEl.classList.remove('show');
 }
 
 // ---------------- broom ----------------
@@ -2668,11 +2698,6 @@ function showBubble(icon) {
   bubbleEl.textContent = icon;
   bubbleEl.classList.remove('show'); void bubbleEl.offsetWidth; bubbleEl.classList.add('show');
   bubbleUntil = performance.now() + 2600;
-}
-function placeBubble() {
-  if (performance.now() > bubbleUntil) { bubbleEl.classList.remove('show'); return; }
-  const q = pet.pos(), [sx, sy] = toScreen(q.x + pet.hx * 0.4, q.y + pet.hy + 2);
-  bubbleEl.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px)`;
 }
 function floatText(x, y, text, cls) {
   const el = document.createElement('div');
@@ -2769,9 +2794,7 @@ function frame(now) {
   pet.update(dt);
   for (const pr of props) pr.update();
   updateBits(dt);
-  placeBubble();
-  placeBanner();
-  placeStatus();
+  placeOverlays();
   if (debugLines) {
     const { vertices, colors } = world.debugRender();
     debugLines.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
