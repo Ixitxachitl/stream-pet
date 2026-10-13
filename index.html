@@ -43,7 +43,7 @@
     agerate   how much faster it grows up (for testing)
     ball      1 = drop a ball in to play with
     drop      things to drop in at the start, for testing: drop=apple,fish,cookie,cake,poop,ball
-              (or stream events: raid, sub, bits, chat)
+              (or stream events: raid, sub, bits, chat, gg)
     debug     1 = collider wireframes + a status readout
     settle    seconds of simulation to run before the first frame (for screenshots)
     speed     life-clock speed: needs fall this many times faster (for testing)
@@ -2382,6 +2382,7 @@ function onChat({ name, text = '', platform = 'custom', emoteOnly = false, mod =
   }
   if (!pet.asleep && pet.action?.name === 'idle' && Math.random() < 0.4) pet.face(Math.random() < 0.5 ? -1 : 1); // glances over
   if (!first) learnFrom(text, name, platform);
+  if (isGG(text)) cheerGG(name, platform);
   const fm = /^!pet\s+forget\s+(\S+)/i.exec(text);
   if (fm && mod && CFG.talk) { forgetWord(fm[1]); floatText(pet.pos().x, pet.pos().y + pet.hy + 2, '?', 'heart'); return; }
   if (CFG.cmds && /^!pet\b/i.test(text)) petCommand(text.slice(4).trim().toLowerCase(), name);
@@ -2452,6 +2453,49 @@ function onFollow({ name }) {
 }
 
 // Wave hello to a first-time chatter, with their name over its head.
+// ---- gg: when chat says gg together, it does a little victory dance ----
+// "gg", "ggs", "gg wp", "ggwp", "good game", "ggez", and GG emotes like peepoGG or catGG.
+const isGG = (text) => /(^|[^a-z])(gg+s?|gg ?wp|gg ?ez|good game)([^a-z]|$)/i.test(text) || /[a-z]GG\b/.test(text);
+const ggs = [];      // [time, who] of recent gg's
+let victoryAt = -Infinity;
+function cheerGG(name, platform) {
+  const now = performance.now(), who = platform + ':' + String(name).toLowerCase();
+  ggs.push([now, who]);
+  while (ggs.length && now - ggs[0][0] > 15000) ggs.shift();
+  if (new Set(ggs.map(g => g[1])).size >= 3 && now - victoryAt > 60000 && save.stage !== 'egg' && !pet.asleep && !cutscene) {
+    victoryAt = now; ggs.length = 0;
+    startAction(pet, 'victory');
+  }
+}
+ACTIONS.victory = {
+  bubble: '🏆', minTime: 3.1,
+  score: () => 0, // only ever started by chat's gg's
+  start(p, a) { p.face(0); p.expr = 'happy'; a.hops = 0; if (CFG.talk) setTimeout(() => say('gg!'), 2600); },
+  step(p, dt, a) {
+    const q = p.pos(), b = p.body, m = b.mass();
+    // three little hops, rocking side to side
+    if (a.hops < 3 && a.t > 0.15 + a.hops * 0.6 && p.grounded) {
+      const side = a.hops % 2 ? 1 : -1;
+      b.applyImpulse({ x: 0, y: m * p.S.hopV * 0.6, z: 0 }, true);
+      b.applyTorqueImpulse({ x: 0, y: 0, z: side * p.inertia * 1.5 }, true);
+      p.sqV += 3;
+      spawnBits(q.x, q.y + p.hy, SPARKLE, 6, { vy: 8, spread: 8, size: 0.4, life: 0.8, grav: 0 });
+      sfx('hop');
+      a.hops++;
+    }
+    // then a spin, in a burst of confetti
+    if (a.t > 1.9 && !a.spun) {
+      a.spun = true;
+      spawnBits(q.x, q.y + p.hy, [0xff4d6d, 0x3ab0ff, 0xffd23f, 0x5cc04a, 0xb76bff], 24, { vy: 16, spread: 14, size: 0.5, life: 1.6, grav: 0.4 });
+      sfx('sparkle');
+    }
+    const st = clamp((a.t - 1.9) / 0.8, 0, 1);
+    p.spin = Math.PI * 2 * (1 - Math.cos(Math.PI * st)) / 2;
+    return a.t > 3;
+  },
+  end(p) { p.spin = 0; p.expr = 'open'; N.fun = clamp(N.fun + 15, 0, 100); N.social = clamp(N.social + 5, 0, 100); },
+};
+
 ACTIONS.greet = {
   score: () => (greets.length && !(pet.asleep && isNight()) ? 0.7 : 0),
   start(p, a) {
@@ -2614,6 +2658,7 @@ function runDemo() {
     if (r < 0.01) onSub({ name: 'PixelPaws' });
     else if (r < 0.025) onBits({ name: 'bean_counter', amount: 100 });
     else if (r < 0.029) onRaid({ name: 'voxel_vic', viewers: 25 });
+    else if (r < 0.035) ['mochi_fan', 'lofi_luna', 'hype_hana'].forEach((n, i) => setTimeout(() => { demoing = true; onChat({ name: n, text: i ? 'gg' : 'GG WP', platform: 'demo' }); demoing = false; }, i * 700));
     demoing = false;
     setTimeout(say, rand(1500, 6000));
   };
@@ -2982,6 +3027,7 @@ function dropThing(kind = 'ball') {
   else if (kind === 'sub') onSub({ name: 'TestSubber', count: 1 });
   else if (kind === 'bits') onBits({ name: 'TestCheerer', amount: 500 });
   else if (kind === 'chat') onChat({ name: 'test_chatter', text: 'hi!' });
+  else if (kind === 'gg') ['a_chatter', 'b_chatter', 'c_chatter'].forEach((n, i) => onChat({ name: n, text: ['gg', 'GG WP', 'peepoGG'][i] }));
 }
 for (const k of (Q.get('drop') || '').split(',').filter(Boolean)) dropThing(k);
 
