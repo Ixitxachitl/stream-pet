@@ -27,6 +27,7 @@
     size      adult height on screen in px (default 160)
     status    events (default), always or off: the little name and needs card
     night     local hours it wants to sleep, e.g. 1-7 (default), or off
+    sfx       sound effects volume 0-100 (default 0 = off)
     ground    floor height in px from the bottom (default 0)
     xmin/xmax left/right walls in % of the width (default 0/100)
     slot      name of the save slot, to run more than one pet (default main)
@@ -192,6 +193,7 @@ const FIELDS = [
   { k: 'name', label: 'Name', type: 'text', def: '', ph: '(a cute generated one)', help: 'Leave empty to let it have its own.' },
   { k: 'size', label: 'Grown-up size (px)', type: 'num', def: 160, min: 60, max: 400, step: 5, help: 'How tall an adult is on screen. Babies are smaller.' },
   { k: 'status', label: 'Status card', type: 'select', def: 'events', opts: [['events', 'On big moments'], ['always', 'Always'], ['off', 'Never']] },
+  { k: 'sfx', label: 'Sound effects volume', type: 'num', def: 0, min: 0, max: 100, step: 5, help: '0 = off. In OBS, tick "Control audio via OBS" to hear them.' },
   { k: 'night', label: 'Bedtime hours', type: 'text', def: '1-7', ph: '1-7', help: 'Local hours it wants to sleep, like 23-7. "off" for never.' },
   { sec: 'Where it lives' },
   { k: 'ground', label: 'Floor height (px)', type: 'num', def: 0, min: 0, max: 2000, step: 1, help: 'Raise it to stand on top of something.' },
@@ -766,18 +768,18 @@ const FEET = {
   },
 };
 
-// Eyes: one drawing per expression, for the RIGHT eye. k = pupil, w = shine. Expressions listed in
+// Eyes: one drawing per expression, for the RIGHT eye (a drawing can be wider than the eye; it's centred). k = pupil, w = shine. Expressions listed in
 // `mirrored` are flipped for the left eye (slanted ones); the rest are drawn the same on both sides, so
 // the shine is on the same side of both eyes. Missing expressions fall back to open.
 const EYES = {
-  round:   { w: 2, h: 2, mirrored: ['sad'], open: ['wk', 'kk'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
+  round:   { w: 2, h: 2, mirrored: ['sad'], open: ['wk', 'kk'], shut: ['..', 'kk'], happy: ['.k.', 'k.k'], sad: ['k.', '.k'] },
   big:     { w: 3, h: 3, mirrored: ['sad'], open: ['wkk', 'kkk', 'kkk'], shut: ['...', '...', 'kkk'], happy: ['.k.', 'k.k', '...'], sad: ['k..', '.kk', '...'] },
-  sleepy:  { w: 2, h: 2, mirrored: ['sad'], open: ['..', 'kk'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
-  sharp:   { w: 2, h: 2, mirrored: ['open', 'sad'], open: ['k.', 'kk'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
+  sleepy:  { w: 2, h: 2, mirrored: ['sad'], open: ['..', 'kk'], shut: ['..', 'kk'], happy: ['.k.', 'k.k'], sad: ['k.', '.k'] },
+  sharp:   { w: 2, h: 2, mirrored: ['open', 'sad'], open: ['k.', 'kk'], shut: ['..', 'kk'], happy: ['.k.', 'k.k'], sad: ['k.', '.k'] },
   tiny:    { w: 1, h: 1, mirrored: [], open: ['k'], shut: ['k'] },
   wide:    { w: 3, h: 2, mirrored: ['sad'], open: ['wkk', 'kkk'], shut: ['...', 'kkk'], happy: ['kkk', '...'], sad: ['kk.', '..k'] },
   dot:     { w: 1, h: 2, mirrored: [], open: ['k', 'k'], shut: ['.', 'k'], happy: ['k', '.'] },
-  sparkle: { w: 2, h: 2, mirrored: ['sad'], open: ['wk', 'kw'], shut: ['..', 'kk'], happy: ['kk', '..'], sad: ['k.', '.k'] },
+  sparkle: { w: 2, h: 2, mirrored: ['sad'], open: ['wk', 'kw'], shut: ['..', 'kk'], happy: ['.k.', 'k.k'], sad: ['k.', '.k'] },
 };
 const EXPRESSIONS = ['open', 'shut', 'happy', 'sad'];
 
@@ -878,6 +880,7 @@ function buildCritter(recipe, pal) {
       let rows = E[ex2];
       if (side < 0 && E.mirrored.includes(ex2)) rows = rows.map(r => [...r].reverse().join(''));
       m[ex2] = voxMesh(flat(rows, eyeMap), { layer: LAYER.face });
+      m[ex2].position.x = (E.w - rows[0].length) / 2; // drawings wider than the eye stay centred on it
       m[ex2].visible = ex2 === 'open';
       g.add(m[ex2]);
     }
@@ -1361,6 +1364,7 @@ const rollOf = (q) => wrapAngle(2 * Math.atan2(q.z, q.w));
 // spring stiffness, damping, how much hops move it, max angle, for each kind of part motion
 const SPRINGS = { loose: [180, 10, 1, 0.9], stiff: [600, 30, 0.25, 0.25], tail: [120, 6, 0.8, 1], wing: [0], flicker: [0] };
 const HOVER = 2.5; // how high floaty bodies hover, in voxels
+const DOWN = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }); // reused for ground checks
 
 class Pet {
   constructor(recipe, label, x = 0) { this.build(recipe, label, x, 30); }
@@ -1402,7 +1406,8 @@ class Pet {
     let hit = false;
     for (const o of [-0.8, 0, 0.8]) {
       const reach = this.hy + 0.35 + Math.abs(o) * this.hx * Math.sin(tilt) + (o ? 0.3 : 0) + (this.S.hover ? HOVER + 1 : 0);
-      if (world.castRay(new RAPIER.Ray({ x: p.x + o * this.hx, y: p.y, z: 0 }, { x: 0, y: -1, z: 0 }), reach, true,
+      DOWN.origin = { x: p.x + o * this.hx, y: p.y, z: 0 };
+      if (world.castRay(DOWN, reach, true,
         undefined, groups(G.PET, G.WORLD | G.PROP), undefined, this.body)) { hit = true; break; }
     }
     this.still = Math.hypot(v.x, v.y) < 0.6 ? (this.still ?? 0) + dt : 0;
@@ -1434,7 +1439,8 @@ class Pet {
 
     // floaty bodies hover a little way up on a spring instead of standing
     if (S.hover) {
-      const hit = world.castRay(new RAPIER.Ray(p, { x: 0, y: -1, z: 0 }), 30, true, undefined,
+      DOWN.origin = p;
+      const hit = world.castRay(DOWN, 30, true, undefined,
         groups(G.PET, G.WORLD | G.PROP), undefined, b);
       const gap = hit ? hit.timeOfImpact - this.hy : 30;
       if (gap < HOVER + 3) {
@@ -1481,6 +1487,7 @@ class Pet {
         const m = b.mass();
         b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (hv - v.y), z: 0 }, true);
         this.sqV += 3;
+        sfx('hop');
       }
     }
     return false;
@@ -1834,6 +1841,7 @@ function eatStep(p, dt, a) {
       if (F.health) life.health = clamp(life.health + F.health / F.bites, 0, 100);
       if (F.value && !life.digestAt) life.digestAt = life.t + rand(600, 1500);
       biteFood(food, px);
+      sfx('chomp');
     }
   }
 }
@@ -1917,6 +1925,7 @@ const ACTIONS = {
         p.face(a.dir);
         const m = ball.body.mass();
         ball.body.applyImpulse({ x: a.dir * m * rand(25, 45), y: m * rand(15, 40), z: 0 }, true);
+        sfx('hop');
         p.sqV += 2;
         N.fun = clamp(N.fun + 7, 0, 100);
         p.mood('happy', 1);
@@ -2101,6 +2110,7 @@ function stepCutscene(dt) {
         c.shake = Math.max(0.08, 0.3 - c.t * 0.15);
         pet.body.applyTorqueImpulse({ x: 0, y: 0, z: pet.inertia * (Math.random() < 0.5 ? -1 : 1) * (1 + c.t * 2) }, true);
         spawnBits(q.x, q.y + pet.hy * 0.5, [pal.shell, pal.accent], 2, { vy: 14, spread: 10, size: 0.45, life: 1.2 });
+        sfx('crack');
       }
     } else if (Math.random() < 0.5) {
       spawnBits(q.x + rand(-pet.hx, pet.hx), q.y + rand(-pet.hy, pet.hy), SPARKLE, 1, { vy: 6, spread: 6, size: 0.4, life: 1, grav: 0 });
@@ -2112,6 +2122,7 @@ function stepCutscene(dt) {
       pet.build(recipeFor(c.next), c.next, q.x, q.y + 1);
       pet.frozen = true;
       pet.body.applyImpulse({ x: 0, y: pet.body.mass() * 25, z: 0 }, true);
+      sfx('sparkle');
       spawnBits(q.x, q.y, hatch ? [oldPal.shell, oldPal.accent] : [pal.body, pal.accent, ...SPARKLE], hatch ? 30 : 40,
         { vy: 20, spread: 18, size: 0.5, life: 1.8, grav: hatch ? 1 : 0.15 });
       c.swapped = true;
@@ -2262,6 +2273,7 @@ function onBits({ name, amount = 100 }) {
   N.fun = clamp(N.fun + Math.min(30, amount / 50), 0, 100);
   // coins rain from the top of the screen
   const n = clamp(Math.round(Math.log10(Math.max(10, amount)) * 4), 3, 14);
+  sfx('coin');
   for (let i = 0; i < n; i++) {
     setTimeout(() => spawnBits(rand(B.left + 5, B.right - 5), screenTop(), [0xffd23f, 0xf2a33a, 0xfff3a0], 1,
       { vx: 0, vy: -10, spread: 4, size: 0.9, life: 4, grav: 0.6 }), i * 90);
@@ -2303,6 +2315,7 @@ ACTIONS.greet = {
     p.face(0); p.expr = 'happy';
     const q = p.pos();
     floatText(q.x, q.y + p.hy + 3, a.who, 'name');
+    sfx('chirp');
     if (p.grounded) p.body.applyImpulse({ x: 0, y: p.body.mass() * p.S.hopV * 0.5, z: 0 }, true);
   },
   step(p, dt, a) {
@@ -2520,6 +2533,7 @@ function sweepAway(poop) {
     if (fx.t > 0.4 && Math.random() < 0.3) spawnBits(pp.x, 0.5, [0xd8c8a8], 1, { vx: -fx.side * 6, vy: 6, size: 0.35, life: 0.6 });
     if (fx.t > 1.8 && !poop.gone) {
       spawnBits(pp.x, 1.5, SPARKLE, 14, { vy: 10, spread: 10, size: 0.45, life: 1.2, grav: 0 });
+      sfx('poof');
       poop.remove();
     }
     if (fx.t > 2.4) { scene.remove(g); fx.done = true; }
@@ -2529,6 +2543,45 @@ function sweepAway(poop) {
 }
 function stepEffects(dt) {
   for (let i = effects.length - 1; i >= 0; i--) { effects[i].step(dt); if (effects[i].done) effects.splice(i, 1); }
+}
+
+
+// ---------------- sound (optional, off by default) ----------------
+// Tiny synthesized blips, no files. In OBS, tick "Control audio via OBS" on the browser source to hear
+// them and set their volume there too.
+let AC = null;
+function sfx(kind) {
+  if (!CFG.sfx || document.hidden) return;
+  try { AC ??= new AudioContext(); } catch (e) { return; }
+  if (AC.state === 'suspended') AC.resume();
+  const t = AC.currentTime, vol = CFG.sfx / 100 * 0.25;
+  const tone = (f0, f1, dur, type = 'sine', at = 0, v = 1) => {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t + at);
+    o.frequency.exponentialRampToValueAtTime(f1, t + at + dur);
+    g.gain.setValueAtTime(0.0001, t + at);
+    g.gain.exponentialRampToValueAtTime(vol * v, t + at + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + at + dur);
+    o.connect(g).connect(AC.destination);
+    o.start(t + at); o.stop(t + at + dur + 0.02);
+  };
+  const noise = (dur, at = 0, v = 1, freq = 1200) => {
+    const b = AC.createBuffer(1, Math.ceil(AC.sampleRate * dur), AC.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+    src.buffer = b; f.type = 'bandpass'; f.frequency.value = freq; g.gain.value = vol * v;
+    src.connect(f).connect(g).connect(AC.destination);
+    src.start(t + at);
+  };
+  const pitch = 1.6 - Math.min(0.8, (pet?.S.h ?? 8) / 20); // small critters squeak higher
+  if (kind === 'hop') tone(220 * pitch, 440 * pitch, 0.12, 'sine', 0, 0.5);
+  else if (kind === 'chomp') noise(0.07, 0, 0.9, 900);
+  else if (kind === 'chirp') { tone(700 * pitch, 1100 * pitch, 0.08); tone(900 * pitch, 1400 * pitch, 0.1, 'sine', 0.1); }
+  else if (kind === 'coin') { tone(988, 988, 0.08, 'square', 0, 0.35); tone(1319, 1319, 0.25, 'square', 0.08, 0.35); }
+  else if (kind === 'sparkle') [0, 4, 7, 12, 16].forEach((n, i) => tone(523 * 2 ** (n / 12), 523 * 2 ** (n / 12), 0.25, 'triangle', i * 0.07, 0.6));
+  else if (kind === 'poof') noise(0.3, 0, 0.6, 2500);
+  else if (kind === 'crack') noise(0.05, 0, 1, 3000);
 }
 
 // ---------------- bubbles and floating text (DOM, over the canvas) ----------------
