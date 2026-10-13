@@ -1,5 +1,10 @@
 # Stream Pet — plan
 
+**Status (2026-10-13):** milestones 1–10 are built, committed and checked in headless Chrome. Not yet
+done: testing in real OBS (CEF, hardware acceleration on and off, long sessions), deploying to
+`pet.ixitxachitl.com`, and a curation pass over the whole gallery (`?gallery=1`). For card screenshots,
+`?gallery=1&ids=egg,baby,r0,…` renders a line-up on a transparent background.
+
 An OBS Browser Source overlay with a small voxel creature that lives on your stream. It works like a
 Tamagotchi with nobody pressing the buttons. It gets hungry, sleepy, bored and messy, and it deals with all
 of that by itself. Chat activity and stream events change its mood and how it grows up. It ages

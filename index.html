@@ -1255,6 +1255,10 @@ function galleryPalette(recipe, seed = 'gallery') {
     : recipe.element ? elementPalette(recipe.element, seed) : makePalette(seed));
 }
 function runGallery() {
+  // ?ids=egg,baby,r0,f12… shows just those, standing in one row on a transparent background (for
+  // screenshots of the site's cards). seed= picks the colours of the stages that use the pet's own.
+  const ids = (Q.get('ids') || '').split(',').filter(Boolean);
+  if (ids.length) return runLineup(ids);
   document.body.classList.add('gallery');
   const all = [
     ...Object.entries(TEENS).map(([t, r]) => ({ id: 't-' + t, recipe: r, name: 'teen', info: t })),
@@ -1306,6 +1310,25 @@ function runGallery() {
     renderer.render(scene, gcam);
   };
   requestAnimationFrame(loop);
+}
+function runLineup(ids) {
+  const seed = Q.get('seed') || 'gallery';
+  const items = ids.map(id => STAGES[id] ? { recipe: STAGES[id], pal: withPartColours(makePalette(seed + id)) }
+    : formById(id) && { recipe: formById(id).recipe, pal: galleryPalette(formById(id).recipe, seed) }).filter(Boolean);
+  const W = innerWidth, H = innerHeight, GAP = 17, px = Math.min(W / (items.length * GAP), H / 16);
+  renderer.setSize(W, H);
+  const lcam = new THREE.OrthographicCamera(-W / 2 / px, W / 2 / px, H / px - 2, -2, 1, 1000);
+  lcam.position.set(0, 0, 300);
+  items.forEach((it, i) => {
+    const parts = buildCritter(it.recipe, it.pal);
+    parts.root.position.set((i - (items.length - 1) / 2) * GAP, 0, 0);
+    parts.root.rotation.x = PITCH;
+    parts.squash.rotation.y = (i % 2 ? -1 : 1) * 0.3;
+    scene.add(parts.root);
+    const sh = blobShadow();
+    placeShadow(sh, parts.root.position.x, parts.S.w, 0);
+  });
+  renderer.render(scene, lcam);
 }
 
 if (Q.get('gallery') === '1') {
