@@ -1485,8 +1485,15 @@ class Pet {
     if (Math.abs(roll) > 1.0 && this.dazed <= 0 && !S.egg) this.dazed = 1.4;
     if (this.dazed > 0) {
       this.dazed -= dt;
-      if (this.dazed <= 0 && this.grounded) b.applyImpulse({ x: 0, y: b.mass() * 18, z: 0 }, true); // scramble up
+      if (this.dazed <= 0) {
+        if (this.grounded) this.rightItself(roll, 1.2); // scramble up
+        else this.dazed = 0.3;                          // not on anything yet: try again in a moment
+      }
     }
+    // Propped up at an angle (on a ball, the bed's edge, poop, a wall) where the upright push can't
+    // lift it off: after half a second it does a little hop to pop itself level, so it never gets stuck.
+    this.leanT = Math.abs(roll) > 0.35 && this.dazed <= 0 && !S.egg ? (this.leanT ?? 0) + dt : 0;
+    if (this.leanT > 0.5 && this.grounded) { this.leanT = 0; this.rightItself(roll, 0.7); }
 
     // floaty bodies hover a little way up on a spring instead of standing
     if (S.hover) {
@@ -1519,6 +1526,14 @@ class Pet {
     if (this.moodT > 0 && (this.moodT -= dt) <= 0) this.expr = 'open';
   }
 
+  // A hop up and away from whatever it's leaning on, with a twist back toward level.
+  rightItself(roll, power) {
+    const b = this.body, m = b.mass(), lean = Math.sign(roll) || 1; // +roll = top tipped to the left
+    b.applyImpulse({ x: lean * m * 6 * power, y: m * this.S.hopV * 0.7 * power, z: 0 }, true);
+    b.applyTorqueImpulse({ x: 0, y: 0, z: -roll * this.inertia * 5 * power }, true);
+    this.sqV += 2;
+  }
+
   // show an expression for a while
   mood(expr, secs) { this.expr = expr; this.moodT = secs; }
 
@@ -1528,7 +1543,7 @@ class Pet {
     const dx = x - p.x, dist = Math.abs(dx);
     if (dist <= near) { this.crouch = 0; return true; }
     if (dist > 0.5) this.face(Math.sign(dx));
-    if (this.grounded && this.dazed <= 0 && Math.abs(this.roll) < 0.4) {
+    if (this.grounded && this.dazed <= 0 && Math.abs(this.roll) < 0.7) {
       this.crouch += dt;
       if (this.crouch > 0.14) {
         this.crouch = 0;
@@ -1537,6 +1552,7 @@ class Pet {
         const hs = Math.min(S.hopS * this.speedUp, dist / (2 * hv / GRAVITY));
         const m = b.mass();
         b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (hv - v.y), z: 0 }, true);
+        if (Math.abs(this.roll) > 0.15) b.applyTorqueImpulse({ x: 0, y: 0, z: -this.roll * this.inertia * 3 }, true); // and level out
         this.sqV += 3;
         sfx('hop');
       }
