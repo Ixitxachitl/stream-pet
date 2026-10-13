@@ -19,6 +19,9 @@
     drop      things to drop in at the start, for testing: drop=apple,fish,cookie,cake,poop,ball
     debug     1 = collider wireframes + a status readout
     settle    seconds of simulation to run before the first frame (for screenshots)
+    speed     life-clock speed: needs fall this many times faster (for testing)
+    night     local hours it wants to sleep, e.g. 1-7 (default), or off
+    set       start needs for testing, e.g. set=hunger:10,energy:5
 
   window.pet.hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy') are there for testing.
 -->
@@ -28,6 +31,19 @@
   #hud{position:fixed;left:8px;top:8px;font:12px/1.35 monospace;color:#fff;background:#000a;
     padding:6px 8px;border-radius:6px;white-space:pre;display:none;pointer-events:none}
   body.debug #hud{display:block}
+  /* thought bubble: moved over the pet's head every frame */
+  #bubble{position:fixed;left:0;top:0;margin:-62px 0 0 -6px;padding:10px 12px;background:#fff;border-radius:22px;
+    box-shadow:0 3px 10px #0004;pointer-events:none;will-change:transform;opacity:0;transition:opacity .25s;
+    font:34px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif}
+  #bubble.show{opacity:1;animation:pop .35s cubic-bezier(.3,1.6,.5,1)}
+  #bubble::after{content:"";position:absolute;left:12px;bottom:-9px;width:14px;height:14px;background:#fff;
+    border-radius:50%;box-shadow:-8px 10px 0 -3px #fff}
+  @keyframes pop{from{scale:.3}to{scale:1}}
+  .float{position:fixed;pointer-events:none;font:700 22px/1 "Comic Neue","Comic Sans MS",sans-serif;
+    animation:floatUp 2.5s ease-out forwards}
+  .float.zzz{color:#e8f0ff;text-shadow:0 2px 4px #0006}
+  @keyframes floatUp{0%{opacity:0;transform:translate(0,0) scale(.6)}15%{opacity:1}
+    100%{opacity:0;transform:translate(26px,-90px) scale(1.4)}}
 </style>
 <script type="importmap">
 {
@@ -40,6 +56,7 @@
 </head>
 <body>
 <div id="hud"></div>
+<div id="bubble"></div>
 <script type="module">
 import * as THREE from 'three';
 import RAPIER from 'rapier';
@@ -59,6 +76,7 @@ const CFG = {
   stage: ['egg', 'baby', 'child', 'adult'].includes(Q.get('stage')) ? Q.get('stage') : 'baby',
   ball: Q.get('ball') === '1',
   debug: Q.get('debug') === '1',
+  speed: num('speed', 1, 0.1, 3600),
 };
 if (CFG.xmax - CFG.xmin < 10) { CFG.xmin = 0; CFG.xmax = 100; }
 if (CFG.debug) document.body.classList.add('debug');
@@ -581,9 +599,10 @@ class Pet {
       .setDensity(1).setFriction(0.9).setRestitution(0.05)
       .setCollisionGroups(groups(G.PET, G.WORLD | G.PROP)), this.body);
     this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
-    this.state = 'idle'; this.timer = rand(0.5, 1.5); this.target = null;
+    this.action = null; this.rethink = 0; this.scores = {}; this.cool = {}; this.timer = rand(0.5, 1.5);
+    this.asleep = false; this.poseSq = 0; this.speedUp = 1; this.roll = 0;
     this.facing = 0;            // -1 left, 0 toward the camera, 1 right
-    this.yaw = 0; this.yawV = 0; this.glance = 0;
+    this.yaw = 0; this.yawV = 0;
     this.grounded = false; this.dazed = 0; this.crouch = 0;
     this.sq = 0; this.sqV = 0; this.lastVy = 0;
     this.blink = rand(2, 5); this.expr = 'open'; this.shownExpr = null; this.moodT = 0;
@@ -591,10 +610,19 @@ class Pet {
 
   pos() { return this.body.translation(); }
 
-  isGrounded() {
-    const hit = world.castRay(new RAPIER.Ray(this.pos(), { x: 0, y: -1, z: 0 }), this.hy + 0.35, true,
-      undefined, groups(G.PET, G.WORLD | G.PROP), undefined, this.body);
-    return !!hit;
+  // Standing on something? Three rays across its base, so it can tell when it's resting on an edge or
+  // a corner. And anything that has come to rest counts as standing, so it can never get stuck
+  // leaning on something with its feet in the air.
+  isGrounded(dt) {
+    const p = this.pos(), v = this.body.linvel(), tilt = Math.abs(this.roll);
+    let hit = false;
+    for (const o of [-0.8, 0, 0.8]) {
+      const reach = this.hy + 0.35 + Math.abs(o) * this.hx * Math.sin(tilt) + (o ? 0.3 : 0);
+      if (world.castRay(new RAPIER.Ray({ x: p.x + o * this.hx, y: p.y, z: 0 }, { x: 0, y: -1, z: 0 }), reach, true,
+        undefined, groups(G.PET, G.WORLD | G.PROP), undefined, this.body)) { hit = true; break; }
+    }
+    this.still = Math.hypot(v.x, v.y) < 0.6 ? (this.still ?? 0) + dt : 0;
+    return hit || this.still > 0.3;
   }
 
   // Turning is a quick sprite-like flip between three poses, not a physical rotation.
@@ -608,7 +636,7 @@ class Pet {
   step(dt) {
     const S = this.S, b = this.body, p = this.pos(), v = b.linvel();
     const wasGrounded = this.grounded;
-    this.grounded = this.isGrounded();
+    this.grounded = this.isGrounded(dt);
     if (this.grounded && !wasGrounded) this.sqV -= clamp(-this.lastVy * 0.045, 0, 2.2); // landing squish
     this.lastVy = v.y;
 
@@ -629,48 +657,8 @@ class Pet {
 
     if (S.egg) return this.eggStep(dt);
 
-    // brain (placeholder until the needs/utility AI: wander and play)
-    this.timer -= dt;
-    if (this.state === 'idle') {
-      // face the camera, with the odd glance to one side
-      this.glance -= dt;
-      if (this.glance <= 0) {
-        this.face(this.facing === 0 && Math.random() < 0.35 ? (Math.random() < 0.5 ? -1 : 1) : 0);
-        this.glance = this.facing ? rand(0.6, 1.4) : rand(1.5, 4);
-      }
-      const food = props.find(pr => pr.kind === 'food');
-      if (food && food.pos().y < 8) { this.state = 'eat'; this.target = food; }
-      else if (this.timer <= 0) {
-        const m = this.hx + 2;
-        const ball = props.find(pr => pr.kind === 'ball');
-        if (ball && Math.random() < 0.45) {
-          const bx = ball.body.translation().x;
-          this.target = { x: bx + Math.sign(bx - p.x) * 2 };
-        } else if (Math.random() < 0.6) {
-          this.target = { x: clamp(p.x + rand(-30, 30), B.left + m, B.right - m) };
-        } else {
-          this.target = { x: rand(B.left + m, B.right - m) };
-        }
-        this.state = 'move';
-      }
-    } else if (this.state === 'move') {
-      if (this.hopToward(this.target.x, 2, dt, roll)) { this.state = 'idle'; this.timer = rand(1, 4); this.glance = rand(0.3, 1); }
-    } else if (this.state === 'eat') {
-      const food = this.target;
-      if (food.gone) { this.state = 'idle'; this.timer = rand(1, 3); this.mood('happy', 1.6); return; }
-      const fp = food.pos(), side = Math.sign(p.x - fp.x) || 1;
-      // stand right next to it, facing it
-      const spot = fp.x + side * (this.hx + food.size[0] / 2 + 0.3);
-      if (this.hopToward(spot, 1.2, dt, roll)) {
-        this.face(-side);
-        this.chomp = (this.chomp ?? 0) - dt;
-        if (this.chomp <= 0 && this.grounded) {
-          this.chomp = 0.45;
-          this.sqV -= 2.2;
-          biteFood(food, p.x);
-        }
-      }
-    }
+    this.roll = roll;
+    brainStep(this, dt);
     if (this.moodT > 0 && (this.moodT -= dt) <= 0) this.expr = 'open';
   }
 
@@ -678,18 +666,18 @@ class Pet {
   mood(expr, secs) { this.expr = expr; this.moodT = secs; }
 
   // Hop toward x. Returns true once within `near` of it.
-  hopToward(x, near, dt, roll) {
+  hopToward(x, near, dt) {
     const S = this.S, b = this.body, p = this.pos(), v = b.linvel();
     const dx = x - p.x, dist = Math.abs(dx);
     if (dist <= near) { this.crouch = 0; return true; }
     if (dist > 0.5) this.face(Math.sign(dx));
-    if (this.grounded && this.dazed <= 0 && Math.abs(roll) < 0.4) {
+    if (this.grounded && this.dazed <= 0 && Math.abs(this.roll) < 0.4) {
       this.crouch += dt;
       if (this.crouch > 0.14) {
         this.crouch = 0;
         // short distances get a small shuffle-hop instead of a full jump
         const hv = dist < 6 ? S.hopV * 0.6 : S.hopV;
-        const hs = Math.min(S.hopS, dist / (2 * hv / GRAVITY));
+        const hs = Math.min(S.hopS * this.speedUp, dist / (2 * hv / GRAVITY));
         const m = b.mass();
         b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (hv - v.y), z: 0 }, true);
         this.sqV += 3;
@@ -718,7 +706,9 @@ class Pet {
     const ay = clamp((v.y - (this.prevVy ?? v.y)) / Math.max(dt, 1e-3), -900, 900);
     const ax = clamp((v.x - (this.prevVx ?? v.x)) / Math.max(dt, 1e-3), -900, 900);
     this.prevVy = v.y; this.prevVx = v.x;
-    let target = this.grounded ? 0 : clamp(v.y * 0.004, -0.08, 0.12);
+    // resting pose (sleep, squat) plus slow breathing while asleep
+    let target = this.grounded ? this.poseSq + (this.asleep ? Math.sin(performance.now() / 650) * 0.035 : 0)
+      : clamp(v.y * 0.004, -0.08, 0.12);
     if (this.crouch > 0) target = -0.22;
 
     // The springs are stiff, so integrate them in small steps; one long frame would make them explode.
@@ -808,7 +798,8 @@ class Prop {
 }
 
 // --- food ---
-// Small voxel snacks. bites = how many chomps it takes to finish one.
+// Small voxel snacks. bites = how many chomps it takes to finish one; value / fun / health are how
+// much the whole thing restores.
 const sphereVox = (r, paint) => {
   const vox = new Vox(), n = Math.ceil(r);
   for (let x = -n; x < n; x++) for (let y = -n; y < n; y++) for (let z = -n; z < n; z++) {
@@ -817,12 +808,12 @@ const sphereVox = (r, paint) => {
   return vox;
 };
 const FOODS = {
-  apple: { bites: 4, make() {
+  apple: { bites: 4, value: 30, make() {
     const v = sphereVox(2.3, (x, y) => (y >= 1 && x < 0 ? 0xff7a6e : 0xe8433a));
     v.set(0, 2, 0, 0x7a4a2a); v.set(0, 3, 0, 0x7a4a2a); v.set(1, 3, 0, 0x5cc04a); v.set(2, 3, 0, 0x5cc04a);
     return v;
   } },
-  fish: { bites: 5, make() {
+  fish: { bites: 5, value: 40, make() {
     const v = new Vox();
     for (let x = -3; x <= 2; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 0; z++) {
       if (Math.abs(y) === 1 && (x === -3 || x === 2)) continue;
@@ -833,7 +824,7 @@ const FOODS = {
     v.set(-2, 0, 1, 0x1a1a22);
     return v;
   } },
-  cookie: { bites: 3, make() {
+  cookie: { bites: 3, value: 20, fun: 10, make() {
     const v = new Vox(), chips = [[-1, 1], [1, -1], [2, 1], [-2, -1], [0, 0]];
     for (let x = -3; x < 3; x++) for (let y = -3; y < 3; y++) {
       if (Math.hypot(x + 0.5, y + 0.5) > 3) continue;
@@ -842,7 +833,7 @@ const FOODS = {
     }
     return v;
   } },
-  cake: { bites: 6, make() {
+  cake: { bites: 6, value: 30, fun: 25, make() {
     const v = new Vox();
     for (let x = -3; x < 3; x++) for (let z = -2; z < 2; z++) {
       for (let y = 0; y < 4; y++) v.set(x, y, z, y === 3 ? 0xffb3d1 : y === 1 ? 0xfff1c9 : 0xf3d39a);
@@ -850,9 +841,15 @@ const FOODS = {
     v.set(0, 4, 0, 0xe0213f); v.set(-1, 4, 0, 0xe0213f);
     return v;
   } },
+  // medicine for when it's poorly
+  pill: { bites: 1, value: 0, health: 50, make() {
+    const v = new Vox();
+    for (let x = -2; x < 2; x++) for (let y = 0; y < 2; y++) for (let z = 0; z < 2; z++) v.set(x, y, z, x < 0 ? 0xff5d73 : 0xffffff);
+    return v;
+  } },
 };
 // The dispenser drops food in from the top of the screen.
-function dropFood(kind = Object.keys(FOODS)[Math.floor(Math.random() * 3)], x) {
+function dropFood(kind = ['apple', 'fish', 'cookie'][Math.floor(Math.random() * 3)], x) {
   const F = FOODS[kind];
   const p = new Prop('food', F.make(), { x: x ?? rand(B.left + 10, B.right - 10), y: screenTop() + 6, density: 0.25, restitution: 0.35 });
   p.food = kind; p.bitesLeft = F.bites; p.bitesTotal = F.bites;
@@ -953,6 +950,325 @@ function updateBits(dt) {
 }
 const SPARKLE = [0xffffff, 0xfff3a0, 0xa8f0ff];
 
+// ---------------- life: needs ----------------
+// Needs run from 0 (desperate) to 100 (perfectly happy) and fall over time. The overlay is the
+// caretaker, so the brain always finds a way to fix them; how well that goes shapes it later.
+const life = {
+  needs: { hunger: 75, energy: 85, fun: 65, hygiene: 95, social: 60 },
+  health: 100,
+  digestAt: 0,  // life-clock time the next poop is due (0 = nothing to digest)
+  t: 0,         // life clock in seconds (runs at ?speed)
+};
+const N = life.needs;
+const DECAY = { hunger: 40, energy: 22, fun: 55, hygiene: 6, social: 35 }; // points per hour, awake
+for (const kv of (Q.get('set') || '').split(',')) {        // ?set=hunger:10,energy:5 for testing
+  const [k, v] = kv.split(':');
+  if (k in N) N[k] = clamp(+v, 0, 100); else if (k === 'health') life.health = clamp(+v, 0, 100);
+}
+
+function tickLife(dt) {
+  const h = dt * CFG.speed / 3600;
+  life.t += dt * CFG.speed;
+  const asleep = pet.asleep;
+  for (const k in DECAY) N[k] -= DECAY[k] * h * (asleep ? (k === 'energy' ? 0 : 0.35) : 1);
+  if (asleep) N.energy += 70 * h;
+  N.hygiene -= 25 * h * props.filter(p => p.kind === 'poop').length;
+  for (const k in N) N[k] = clamp(N[k], 0, 100);
+  // health only suffers if a body need is badly neglected, and recovers slowly otherwise. (Social is
+  // about mood, and chat is the only thing that fills it, so it never makes the pet ill.)
+  const low = N.hunger < 12 || N.energy < 12 || N.hygiene < 12;
+  life.health = clamp(life.health + (low ? -25 : 6) * h, 0, 100);
+}
+
+// Night hours (local time) make it want to sleep. ?night=1-7 by default, ?night=off to never.
+const NIGHT = (() => {
+  const v = Q.get('night') ?? '1-7';
+  const m = /^(\d+)-(\d+)$/.exec(v);
+  return m ? [+m[1] % 24, +m[2] % 24] : null;
+})();
+function isNight() {
+  if (!NIGHT) return false;
+  const h = new Date().getHours(), [a, b] = NIGHT;
+  return a <= b ? h >= a && h < b : h >= a || h < b;
+}
+
+// ---------------- brain: utility AI ----------------
+// Every half second each action scores how much it wants to run (roughly 0..1) from the needs, and the
+// best one wins. The running action gets a bonus so it doesn't flip-flop, and some have a minimum
+// time. An action's step() returns true when it's finished; `cool` keeps it from being picked again
+// for that many seconds after it ends.
+const want = (v, from) => clamp((from - v) / from, 0, 1);
+const findProp = (kind, near) => {
+  let best = null, bd = Infinity;
+  for (const p of props) {
+    if (p.kind !== kind || (kind === 'food' && p.food === 'pill')) continue;
+    const d = Math.abs(p.pos().x - near);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+};
+const spotNear = (x, off) => clamp(x + off, B.left + 8, B.right - 8);
+
+// Shared by eat and sick: hop next to the food and chomp until it's gone.
+function eatStep(p, dt, a) {
+  const food = a.food, px = p.pos().x;
+  if (!food || food.gone) { p.mood('happy', 1.6); return true; }
+  const fp = food.pos();
+  if (fp.y > food.halfH + 3 && food.body.linvel().y < -1) { p.face(Math.sign(fp.x - px)); return; } // falling: watch it
+  const side = Math.sign(px - fp.x) || 1;
+  if (p.hopToward(fp.x + side * (p.hx + food.size[0] / 2 + 0.3), 1.2, dt)) {
+    p.face(-side);
+    a.chomp = (a.chomp ?? 0.2) - dt;
+    if (a.chomp <= 0 && p.grounded) {
+      a.chomp = 0.45;
+      p.sqV -= 2.2;
+      const F = FOODS[food.food];
+      N.hunger = clamp(N.hunger + F.value / F.bites, 0, 100);
+      if (F.fun) N.fun = clamp(N.fun + F.fun / F.bites, 0, 100);
+      if (F.health) life.health = clamp(life.health + F.health / F.bites, 0, 100);
+      if (F.value && !life.digestAt) life.digestAt = life.t + rand(600, 1500);
+      biteFood(food, px);
+    }
+  }
+}
+
+const ACTIONS = {
+  idle: {
+    score: () => 0.16,
+    start(p, a) { a.until = rand(3, 8); a.glance = rand(0.5, 2); },
+    step(p, dt, a) {
+      // face the camera, with the odd glance to one side
+      if ((a.glance -= dt) <= 0) {
+        p.face(p.facing === 0 && Math.random() < 0.4 ? (Math.random() < 0.5 ? -1 : 1) : 0);
+        a.glance = p.facing ? rand(0.6, 1.4) : rand(1.5, 4);
+      }
+      return a.t > a.until;
+    },
+  },
+  wander: {
+    score: () => 0.17,
+    start(p, a) {
+      const x = p.pos().x, m = p.hx + 2;
+      a.x = Math.random() < 0.6 ? clamp(x + rand(-30, 30), B.left + m, B.right - m) : rand(B.left + m, B.right - m);
+    },
+    step: (p, dt, a) => p.hopToward(a.x, 2, dt) || a.t > 20,
+  },
+  eat: {
+    bubble: '🍎',
+    score: () => want(N.hunger, 55) ** 0.7 * 1.15 + (findProp('food', 0) && N.hunger < 85 ? 0.3 : 0),
+    start(p, a) {
+      const x = p.pos().x;
+      a.food = findProp('food', x) ?? dropFood(undefined, spotNear(x, (p.facing || (Math.random() < 0.5 ? -1 : 1)) * rand(10, 16)));
+    },
+    step: (p, dt, a) => eatStep(p, dt, a) || a.t > 30,
+  },
+  sick: {
+    bubble: '🤒',
+    score: () => (life.health < 35 ? 1.3 : 0),
+    start(p, a) { a.food = dropFood('pill', spotNear(p.pos().x, rand(-10, 10))); p.expr = 'sad'; },
+    step: (p, dt, a) => eatStep(p, dt, a) || a.t > 30,
+    end(p) { p.expr = 'open'; },
+  },
+  sleep: {
+    bubble: '💤', minTime: 20,
+    score: () => want(N.energy, 35) * 1.1 + (isNight() && N.energy < 75 ? 0.45 : 0) + (pet.asleep && isNight() ? 0.5 : 0),
+    start(p, a) { a.z = 0; },
+    step(p, dt, a) {
+      const bed = findProp('bed', p.pos().x);
+      if (!p.asleep) {
+        if ((!bed || p.hopToward(bed.pos().x, 1.5, dt)) && p.grounded) {
+          p.asleep = true; p.face(0); p.poseSq = -0.18; p.expr = 'shut';
+        }
+        return a.t > 25 && !p.asleep;
+      }
+      if ((a.z -= dt) <= 0) {
+        a.z = 1.3;
+        const q = p.pos();
+        floatText(q.x + p.hx * 0.6, q.y + p.hy + 1, 'z', 'zzz');
+      }
+      return N.energy >= 99 && !isNight();
+    },
+    end(p) { p.asleep = false; p.poseSq = 0; p.expr = 'open'; p.sqV += 3; }, // and a stretch
+  },
+  play: {
+    bubble: '⚽', cool: 8,
+    score: () => want(N.fun, 50) * 0.85,
+    start(p, a) {
+      a.ball = findProp('ball', p.pos().x) ?? dropBall(spotNear(p.pos().x, rand(-15, 15)));
+      a.until = rand(15, 30);
+    },
+    step(p, dt, a) {
+      const ball = a.ball;
+      if (ball.gone) return true;
+      const bp = ball.pos(), px = p.pos().x, reach = p.hx + ball.r + 0.3;
+      // Kick it away from the side it's on, or out of a corner toward the middle. The direction is
+      // picked once per kick so the pet doesn't dither between sides.
+      if (!a.dir) {
+        a.dir = bp.x < B.left + 10 ? 1 : bp.x > B.right - 10 ? -1 : Math.sign(bp.x - px) || 1;
+      }
+      const close = Math.abs(bp.x - px) < reach + 1.5 && bp.y < ball.r + 4;
+      if (close && p.grounded && (a.kickT = (a.kickT ?? 0) - dt) <= 0) {
+        p.face(a.dir);
+        const m = ball.body.mass();
+        ball.body.applyImpulse({ x: a.dir * m * rand(25, 45), y: m * rand(15, 40), z: 0 }, true);
+        p.sqV += 2;
+        N.fun = clamp(N.fun + 7, 0, 100);
+        p.mood('happy', 1);
+        a.dir = 0; a.kickT = 0.6;
+      } else if (!close && bp.y < ball.r + 4) {
+        p.hopToward(clamp(bp.x - a.dir * reach, B.left + p.hx, B.right - p.hx), 1.6, dt);
+      }
+      return a.t > a.until || N.fun >= 98;
+    },
+  },
+  zoomies: {
+    bubble: '❗', cool: 30,
+    score: () => (N.fun > 60 && N.energy > 55 ? 0.1 : 0) + (life.hype ?? 0),
+    start(p, a) {
+      const x = p.pos().x;
+      a.xs = [spotNear(x, 22), spotNear(x, -22)];
+      if (Math.random() < 0.5) a.xs.reverse();
+      a.leg = 0; a.legs = 3 + Math.floor(rand(0, 3));
+      p.expr = 'happy'; p.speedUp = 1.6;
+    },
+    step(p, dt, a) {
+      if (p.hopToward(a.xs[a.leg % 2], 2.5, dt)) a.leg++;
+      return a.leg >= a.legs || a.t > 15;
+    },
+    end(p) { p.expr = 'open'; p.speedUp = 1; N.fun = clamp(N.fun + 10, 0, 100); life.hype = 0; },
+  },
+  clean: {
+    bubble: '🧹', cool: 3,
+    score: () => (findProp('poop', 0) ? 0.4 + want(N.hygiene, 60) * 0.5 : want(N.hygiene, 30) * 0.7),
+    start(p, a) {
+      a.poop = findProp('poop', p.pos().x);
+      if (a.poop) a.broom = sweepAway(a.poop);
+      a.shake = 0;
+    },
+    step(p, dt, a) {
+      if (a.poop) {
+        p.face(Math.sign(a.poop.pos().x - p.pos().x));
+        if (!a.broom.done) return false;
+        N.hygiene = clamp(N.hygiene + 35, 0, 100);
+        p.mood('happy', 1.2);
+        return true;
+      }
+      // nothing to sweep: shake off instead
+      a.shake += dt;
+      p.face(Math.floor(a.shake * 12) % 2 ? 1 : -1);
+      if (Math.random() < 0.5) {
+        const q = p.pos();
+        spawnBits(q.x, q.y + p.hy * 0.5, [0xa8dcff, 0xd8f0ff], 1, { vy: 18, spread: 16, size: 0.4, life: 0.8 });
+      }
+      if (a.shake > 1.1) { N.hygiene = 100; p.face(0); return true; }
+    },
+  },
+  poop: {
+    score: () => (life.digestAt && life.t >= life.digestAt ? 0.9 : 0),
+    start(p) { p.poseSq = -0.3; p.expr = 'shut'; p.face(0); },
+    step(p, dt, a) {
+      if (a.t < 1.3) return false;
+      const q = p.pos(), side = Math.random() < 0.5 ? -1 : 1;
+      dropPoop(clamp(q.x + side * (p.hx + 2.5), B.left + 3, B.right - 3), 2);
+      life.digestAt = 0;
+      p.sqV += 3;
+      return true;
+    },
+    end(p) { p.poseSq = 0; p.expr = 'open'; },
+  },
+};
+
+function brainStep(p, dt) {
+  const cur = p.action;
+  let done = false;
+  if (cur) { cur.t += dt; done = cur.def.step(p, dt, cur) === true; }
+  if (!done && (p.rethink -= dt) > 0) return;
+  p.rethink = 0.5;
+  let best = null, bestScore = -1;
+  p.scores = {};
+  for (const [name, def] of Object.entries(ACTIONS)) {
+    let s = def.score(p) + Math.random() * 0.04 - (p.cool[name] > life.t ? 0.5 : 0);
+    if (cur && !done && name === cur.name) s += 0.2; // stick with what it's doing
+    p.scores[name] = s;
+    if (s > bestScore) { bestScore = s; best = name; }
+  }
+  const mustFinish = cur && !done && cur.t < (cur.def.minTime ?? 0);
+  if (!mustFinish && (done || best !== cur?.name)) startAction(p, best);
+}
+function startAction(p, name) {
+  if (p.action) {
+    p.action.def.end?.(p, p.action);
+    p.cool[p.action.name] = life.t + (p.action.def.cool ?? 0) * CFG.speed; // a short rest from it
+  }
+  const def = ACTIONS[name], a = { name, def, t: 0 };
+  p.action = a;
+  def.start?.(p, a);
+  if (def.bubble) showBubble(def.bubble);
+}
+
+// ---------------- broom ----------------
+// The auto-clean: a little broom drops in next to the poop, sweeps a few times and it's gone.
+const effects = [];
+function sweepAway(poop) {
+  const v = new Vox();
+  for (let y = 3; y < 11; y++) v.set(0, y, 0, 0x9a6a3a);              // handle
+  for (let x = -2; x <= 2; x++) for (let y = 0; y < 3; y++) v.set(x, y, 0, y === 2 ? 0xb03a2e : 0xf2c14e);
+  const g = new THREE.Group(), m = voxMesh(v);
+  m.position.set(-0.5, 0, -0.5);
+  g.add(m);
+  scene.add(g);
+  const fx = { done: false, t: 0, g, poop, side: Math.random() < 0.5 ? -1 : 1 };
+  fx.step = (dt) => {
+    fx.t += dt;
+    const pp = poop.gone ? fx.last : poop.pos();
+    fx.last = pp;
+    const pop = Math.min(1, fx.t * 5), out = fx.t > 2.2 ? Math.max(0, 1 - (fx.t - 2.2) * 5) : 1;
+    g.scale.setScalar(pop * out * 0.8);
+    const swish = Math.sin(fx.t * 14);
+    g.position.set(pp.x + fx.side * (3 + swish * 1.5), 0.2, 1.5);
+    g.rotation.z = fx.side * (0.5 + swish * 0.35);
+    if (fx.t > 0.4 && Math.random() < 0.3) spawnBits(pp.x, 0.5, [0xd8c8a8], 1, { vx: -fx.side * 6, vy: 6, size: 0.35, life: 0.6 });
+    if (fx.t > 1.8 && !poop.gone) {
+      spawnBits(pp.x, 1.5, SPARKLE, 14, { vy: 10, spread: 10, size: 0.45, life: 1.2, grav: 0 });
+      poop.remove();
+    }
+    if (fx.t > 2.4) { scene.remove(g); fx.done = true; }
+  };
+  effects.push(fx);
+  return fx;
+}
+function stepEffects(dt) {
+  for (let i = effects.length - 1; i >= 0; i--) { effects[i].step(dt); if (effects[i].done) effects.splice(i, 1); }
+}
+
+// ---------------- bubbles and floating text (DOM, over the canvas) ----------------
+const projV = new THREE.Vector3();
+function toScreen(x, y) {
+  projV.set(x, y, 0).project(cam);
+  return [(projV.x + 1) / 2 * innerWidth, (1 - projV.y) / 2 * innerHeight];
+}
+const bubbleEl = document.getElementById('bubble');
+let bubbleUntil = 0;
+function showBubble(icon) {
+  bubbleEl.textContent = icon;
+  bubbleEl.classList.remove('show'); void bubbleEl.offsetWidth; bubbleEl.classList.add('show');
+  bubbleUntil = performance.now() + 2600;
+}
+function placeBubble() {
+  if (performance.now() > bubbleUntil) { bubbleEl.classList.remove('show'); return; }
+  const q = pet.pos(), [sx, sy] = toScreen(q.x + pet.hx * 0.4, q.y + pet.hy + 2);
+  bubbleEl.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px)`;
+}
+function floatText(x, y, text, cls) {
+  const el = document.createElement('div');
+  el.className = 'float ' + (cls || '');
+  el.textContent = text;
+  const [sx, sy] = toScreen(x, y);
+  el.style.left = sx + 'px'; el.style.top = sy + 'px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
 // ---------------- loop ----------------
 const pet = new Pet(STAGES[CFG.stage], CFG.stage, (B.left + B.right) / 2);
 placeBed(B.left + 14);
@@ -974,7 +1290,9 @@ if (CFG.debug) {
 const hud = document.getElementById('hud');
 
 function stepSim(dt) {
+  if (!pet.S.egg) tickLife(dt);
   pet.step(dt);
+  stepEffects(dt);
   world.step();
   // anything that escaped the walls comes back in from above
   for (const pr of [pet, ...props]) {
@@ -1013,6 +1331,7 @@ function frame(now) {
   pet.update(dt);
   for (const pr of props) pr.update();
   updateBits(dt);
+  placeBubble();
   if (debugLines) {
     const { vertices, colors } = world.debugRender();
     debugLines.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
@@ -1020,7 +1339,9 @@ function frame(now) {
     const p = pet.pos();
     hud.textContent = `fps ${fps.toFixed(0)}\n` +
       `stage ${pet.stage}  seed ${CFG.seed}  pattern ${pal.pattern}\n` +
-      `state ${pet.state}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}\n` +
+      `action ${pet.action?.name}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}  asleep ${pet.asleep}\n` +
+      `needs ${Object.entries(N).map(([k, v]) => k + ' ' + v.toFixed(0)).join('  ')}  health ${life.health.toFixed(0)}\n` +
+      `wants ${Object.entries(pet.scores).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + v.toFixed(2)).join('  ')}\n` +
       `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
   }
   renderer.render(scene, cam);
@@ -1029,7 +1350,10 @@ requestAnimationFrame(frame);
 
 // ---------------- testing API ----------------
 window.pet = {
-  hop() { pet.state = 'move'; const p = pet.pos(); pet.target = { x: clamp(p.x + rand(-20, 20), B.left + 6, B.right - 6) }; },
+  hop() { startAction(pet, 'wander'); },
+  do(name) { if (ACTIONS[name]) startAction(pet, name); },
+  set(k, v) { if (k in N) N[k] = clamp(v, 0, 100); else if (k === 'health') life.health = clamp(v, 0, 100); },
+  needs: () => ({ ...N, health: life.health }),
   knock(power = 1) {
     const b = pet.body, m = b.mass(), s = Math.random() < 0.5 ? -1 : 1;
     b.applyImpulse({ x: m * 25 * s * power, y: m * 30 * power, z: 0 }, true);
