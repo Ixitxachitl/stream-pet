@@ -1,0 +1,740 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Stream Pet</title>
+<!--
+  STREAM PET — OBS Browser Source overlay
+  A little voxel critter that lives along the bottom of your stream and looks after itself.
+  ------------------------------------------------------------
+  Add as a Browser Source at your canvas size (e.g. 1920x1080). The background is transparent.
+
+  URL parameters (work in progress, the settings panel comes later):
+    size      adult height on screen in px (default 160)
+    ground    floor height in px from the bottom (default 0)
+    xmin/xmax left/right walls in % of the width (default 0/100)
+    seed      look of the pet (colours, pattern); random if not given
+    stage     egg, baby, child or adult (default baby, until the life cycle exists)
+    quality   high or low (default: high, low on software rendering)
+    ball      1 = drop a ball in to play with
+    debug     1 = collider wireframes + a status readout
+    settle    seconds of simulation to run before the first frame (for screenshots)
+
+  window.pet.hop(), .knock(), .drop('ball'), .stage('adult') are there for testing.
+-->
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent}
+  canvas{display:block}
+  #hud{position:fixed;left:8px;top:8px;font:12px/1.35 monospace;color:#fff;background:#000a;
+    padding:6px 8px;border-radius:6px;white-space:pre;display:none;pointer-events:none}
+  body.debug #hud{display:block}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "rapier": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="hud"></div>
+<script type="module">
+import * as THREE from 'three';
+import RAPIER from 'rapier';
+
+// ---------------- config ----------------
+const Q = new URLSearchParams(location.search);
+const num = (k, def, min, max) => {
+  const v = parseFloat(Q.get(k));
+  return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
+};
+const CFG = {
+  size: num('size', 160, 60, 400),
+  ground: num('ground', 0, 0, 2000),
+  xmin: num('xmin', 0, 0, 100),
+  xmax: num('xmax', 100, 0, 100),
+  seed: Q.get('seed') || String(Math.floor(Math.random() * 1e9)),
+  stage: ['egg', 'baby', 'child', 'adult'].includes(Q.get('stage')) ? Q.get('stage') : 'baby',
+  quality: Q.get('quality'),
+  ball: Q.get('ball') === '1',
+  debug: Q.get('debug') === '1',
+};
+if (CFG.xmax - CFG.xmin < 10) { CFG.xmin = 0; CFG.xmax = 100; }
+if (CFG.debug) document.body.classList.add('debug');
+
+// World units are voxels. An adult is about 12 voxels tall, which sets the pixel scale.
+const PX = CFG.size / 12;      // screen px per voxel
+const GRAVITY = 160;           // voxels / s²
+const STEP = 1 / 60;
+const DEPTH = 9;               // half-depth of the floor strip, in voxels
+const PITCH = 22 * Math.PI / 180;
+
+// ---------------- random ----------------
+function hashStr(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+function rngFrom(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---------------- voxels ----------------
+// A sparse voxel grid. Colours are sRGB hex numbers.
+class Vox {
+  constructor() { this.m = new Map(); }
+  static key(x, y, z) { return (x + 512) * 1048576 + (y + 512) * 1024 + (z + 512); }
+  set(x, y, z, c) { this.m.set(Vox.key(x, y, z), c); }
+  get(x, y, z) { return this.m.get(Vox.key(x, y, z)); }
+  has(x, y, z) { return this.m.has(Vox.key(x, y, z)); }
+  *each() {
+    for (const [k, c] of this.m) {
+      yield [Math.floor(k / 1048576) - 512, Math.floor(k / 1024) % 1024 - 512, k % 1024 - 512, c];
+    }
+  }
+  bounds() {
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    for (const [x, y, z] of this.each()) {
+      mn[0] = Math.min(mn[0], x); mn[1] = Math.min(mn[1], y); mn[2] = Math.min(mn[2], z);
+      mx[0] = Math.max(mx[0], x); mx[1] = Math.max(mx[1], y); mx[2] = Math.max(mx[2], z);
+    }
+    return [mn, mx];
+  }
+  // highest/frontmost solid voxel along a column, or null
+  topAt(x, z) { for (let y = 64; y >= -64; y--) if (this.has(x, y, z)) return y; return null; }
+  frontAt(x, y) { for (let z = 64; z >= -64; z--) if (this.has(x, y, z)) return z; return null; }
+  backAt(x, y) { for (let z = -64; z <= 64; z++) if (this.has(x, y, z)) return z; return null; }
+}
+
+// Voxel mesher with per-vertex ambient occlusion. One quad per visible voxel face, on purpose: merged
+// (greedy) quads leave T-junctions that show as flickering hairline cracks, and the models are tiny.
+const AO_CURVE = [0.52, 0.7, 0.86, 1];
+function meshVox(vox) {
+  const pos = [], nor = [], col = [], idx = [];
+  const [mn, mx] = vox.bounds();
+  const ids = new Map(), cols = [];
+  const cid = (hex) => {
+    if (!ids.has(hex)) { ids.set(hex, cols.length); cols.push(new THREE.Color(hex)); }
+    return ids.get(hex);
+  };
+  const p = [0, 0, 0], q = [0, 0, 0], t = [0, 0, 0];
+  for (let d = 0; d < 3; d++) {
+    const u = (d + 1) % 3, v = (d + 2) % 3;
+    const du = mx[u] - mn[u] + 1, dv = mx[v] - mn[v] + 1;
+    const solid = (ou, ov) => {
+      t[0] = q[0]; t[1] = q[1]; t[2] = q[2]; t[u] += ou; t[v] += ov;
+      return vox.has(t[0], t[1], t[2]) ? 1 : 0;
+    };
+    const ao = (cu, cv) => {
+      const s1 = solid(cu, 0), s2 = solid(0, cv), c = solid(cu, cv);
+      return s1 && s2 ? 0 : 3 - (s1 + s2 + c);
+    };
+    for (const s of [1, -1]) {
+      for (let x = mn[d]; x <= mx[d]; x++) {
+        for (let j = 0; j < dv; j++) {
+          for (let i = 0; i < du; i++) {
+            p[d] = x; p[u] = mn[u] + i; p[v] = mn[v] + j;
+            const c = vox.get(p[0], p[1], p[2]);
+            if (c === undefined) continue;
+            q[0] = p[0]; q[1] = p[1]; q[2] = p[2]; q[d] += s;
+            if (vox.has(q[0], q[1], q[2])) continue;
+            const k = ((cid(c) + 1) << 8) | ao(-1, -1) | (ao(1, -1) << 2) | (ao(1, 1) << 4) | (ao(-1, 1) << 6);
+            emitQuad(d, u, v, s, s > 0 ? x + 1 : x, p[u], p[v], 1, 1, k);
+          }
+        }
+      }
+    }
+  }
+  function emitQuad(d, u, v, s, plane, u0, v0, w, h, k) {
+    const base = pos.length / 3;
+    const c = cols[(k >> 8) - 1];
+    const a = [k & 3, (k >> 2) & 3, (k >> 4) & 3, (k >> 6) & 3];
+    // Grow each quad a hair past its edges. At a step, the near face and the face behind it meet on
+    // the same screen edge without sharing vertices, and pixels along that edge would otherwise fall
+    // through to the ink hull behind (flickering dark lines).
+    const e = 0.012;
+    const corners = [[u0 - e, v0 - e], [u0 + w + e, v0 - e], [u0 + w + e, v0 + h + e], [u0 - e, v0 + h + e]];
+    for (let n = 0; n < 4; n++) {
+      const vtx = [0, 0, 0];
+      vtx[d] = plane; vtx[u] = corners[n][0]; vtx[v] = corners[n][1];
+      pos.push(vtx[0], vtx[1], vtx[2]);
+      const nv = [0, 0, 0]; nv[d] = s;
+      nor.push(nv[0], nv[1], nv[2]);
+      const f = AO_CURVE[a[n]];
+      col.push(c.r * f, c.g * f, c.b * f);
+    }
+    // split along the brighter diagonal so AO doesn't streak
+    const flip = a[0] + a[2] < a[1] + a[3];
+    const tris = flip ? [0, 1, 3, 1, 2, 3] : [0, 1, 2, 0, 2, 3];
+    if (s < 0) for (let n = 0; n < 6; n += 3) { const tmp = tris[n + 1]; tris[n + 1] = tris[n + 2]; tris[n + 2] = tmp; }
+    for (const n of tris) idx.push(base + n);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  g.computeBoundingBox();
+  return g;
+}
+
+// Draw layers. Parts attach flush to the body, so their faces can sit exactly on the same plane as
+// body faces and z-fight. Each layer gets a stronger polygon offset, so where two surfaces share a
+// plane the higher layer always wins: body < parts (ears, tail, feet) < face (eyes).
+const LAYER = { body: 0, part: 1, face: 2 };
+const VOX_MATS = [0, 1, 2].map(l => new THREE.MeshLambertMaterial({
+  vertexColors: true, polygonOffset: l > 0, polygonOffsetFactor: -l, polygonOffsetUnits: -4 * l,
+}));
+const INK_MAT = new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.BackSide });
+// Push the hull ~2 voxels away from the camera so it only shows around the silhouette, not through
+// the stair-steps of the voxel surface.
+INK_MAT.onBeforeCompile = (sh) => {
+  sh.vertexShader = sh.vertexShader.replace('#include <project_vertex>',
+    '#include <project_vertex>\n  gl_Position.z += 0.004 * gl_Position.w;');
+};
+const INK = 0.28; // outline thickness in voxels
+
+// A mesh for a voxel grid, with an inverted-hull ink outline like the comic overlays.
+function voxMesh(vox, { ink = true, shadow = true, layer = LAYER.body } = {}) {
+  const geo = meshVox(vox);
+  const mesh = new THREE.Mesh(geo, VOX_MATS[layer]);
+  mesh.castShadow = shadow;
+  if (ink) {
+    const b = geo.boundingBox, c = new THREE.Vector3(), s = new THREE.Vector3();
+    b.getCenter(c); b.getSize(s);
+    const hull = new THREE.Mesh(geo, INK_MAT);
+    hull.scale.set((s.x + 2 * INK) / s.x, (s.y + 2 * INK) / s.y, (s.z + 2 * INK) / s.z);
+    hull.position.copy(c).multiply(new THREE.Vector3(1, 1, 1).sub(hull.scale));
+    mesh.add(hull);
+  }
+  return mesh;
+}
+
+// ---------------- the critter ----------------
+// Colours and pattern come from the seed. Shapes come from the stage (and later, the adult form).
+function makePalette(seed) {
+  const r = rngFrom(hashStr('pal:' + seed));
+  const h = r();
+  const hsl = (hh, s, l) => new THREE.Color().setHSL(((hh % 1) + 1) % 1, s, l, THREE.SRGBColorSpace).getHex(THREE.SRGBColorSpace);
+  const accentShift = [0.5, 0.42, 0.58, 0.08, -0.08][Math.floor(r() * 5)];
+  return {
+    body: hsl(h, 0.55 + r() * 0.2, 0.6 + r() * 0.08),
+    belly: hsl(h + 0.02, 0.6, 0.86),
+    accent: hsl(h + accentShift, 0.6 + r() * 0.2, 0.55),
+    dark: hsl(h, 0.45, 0.4),
+    blush: hsl(0.97, 0.8, 0.76),
+    eye: 0x1a1a22,
+    shine: 0xffffff,
+    shell: hsl(h + 0.1, 0.35, 0.9),
+    pattern: ['none', 'spots', 'stripes', 'socks'][Math.floor(r() * 4)],
+    patternSeed: Math.floor(r() * 1e9),
+  };
+}
+
+const STAGES = {
+  egg:   { egg: true, w: 7, h: 9, d: 7, foot: 0, upright: 40 },
+  baby:  { w: 7, h: 6, d: 6, foot: 1, ear: 'nub', earLen: 1, tail: 0, hopV: 24, hopS: 13, upright: 90 },
+  child: { w: 8, h: 7, d: 7, foot: 1, ear: 'nub', earLen: 2, tail: 2, hopV: 28, hopS: 15, upright: 130 },
+  adult: { w: 10, h: 8, d: 8, foot: 1, ear: 'point', earLen: 3, tail: 4, hopV: 32, hopS: 17, upright: 150 },
+};
+
+function blob(w, h, d, paint, { flat = 0.35, fill = 1.08, taper = 0 } = {}) {
+  const vox = new Vox();
+  const x0 = -Math.floor(w / 2), z0 = -Math.floor(d / 2);
+  for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) for (let z = 0; z < d; z++) {
+    const nx = (x + 0.5 - w / 2) / (w / 2), ny = (y + 0.5 - h / 2) / (h / 2), nz = (z + 0.5 - d / 2) / (d / 2);
+    const k = 1 + taper * ny;  // >0 narrows the top (eggs)
+    const ny2 = ny < 0 ? ny * (1 - flat) : ny;
+    if ((nx * k) ** 2 + ny2 * ny2 + (nz * k) ** 2 <= fill) vox.set(x0 + x, y, z0 + z, paint(nx, ny, nz));
+  }
+  return vox;
+}
+
+function patternPainter(pal, base) {
+  const r = rngFrom(pal.patternSeed);
+  const spots = Array.from({ length: 5 }, () => [r() * 2 - 1, r() * 1.4 - 0.2, r() * 2 - 1]);
+  const stripeOff = r() * 4;
+  return (nx, ny, nz) => {
+    if (pal.pattern === 'spots' && spots.some(([sx, sy, sz]) => (nx - sx) ** 2 + (ny - sy) ** 2 + (nz - sz) ** 2 < 0.09)) return pal.accent;
+    if (pal.pattern === 'stripes' && ny > 0.1 && nz < 0.4 && Math.floor(nx * 3.5 + stripeOff) % 2 === 0) return pal.accent;
+    return base(nx, ny, nz);
+  };
+}
+
+function buildCritter(stageName, pal) {
+  const S = STAGES[stageName];
+  const root = new THREE.Group();   // follows the physics body; origin at the feet
+  const squash = new THREE.Group(); // squash & stretch, pivot at the feet
+  root.add(squash);
+  const parts = { root, squash, ears: [], tail: null, eyes: [], S };
+
+  if (S.egg) {
+    // round slices, widest a bit below the middle
+    const vox = new Vox(), r = rngFrom(pal.patternSeed);
+    const spots = Array.from({ length: 9 }, () => [r() * 2 * Math.PI, 0.12 + r() * 0.66]);
+    for (let y = 0; y < S.h; y++) {
+      const t = (y + 0.5) / S.h * 2 - 1;
+      const rad = S.w / 2 * Math.pow(Math.max(0, 1 - t * t), 0.6) * (1 - 0.2 * t) + 0.2;
+      for (let x = -S.w; x < S.w; x++) for (let z = -S.d; z < S.d; z++) {
+        if (Math.hypot(x + 0.5, z + 0.5) > rad) continue;
+        const ang = Math.atan2(z + 0.5, x + 0.5), ty = (y + 0.5) / S.h;
+        const spot = spots.some(([a, sy]) => Math.abs(wrapAngle(ang - a)) * 1.6 + Math.abs(ty - sy) * 6 < 0.5);
+        vox.set(x, y, z, spot ? pal.accent : pal.shell);
+      }
+    }
+    const m = voxMesh(vox);
+    squash.add(m);
+    return parts;
+  }
+
+  // body
+  const bellyPaint = (nx, ny, nz) => (nz > 0.3 && ny < 0.25 && Math.abs(nx) < 0.62 ? pal.belly : pal.body);
+  const body = blob(S.w, S.h, S.d, patternPainter(pal, bellyPaint));
+  // Placement below works in column indices 0..w-1 and mirrors i ↔ w-1-i, so faces stay symmetric
+  // for odd and even widths. col(i) turns an index into the body's x coordinate.
+  const x0 = -Math.floor(S.w / 2), col = (i) => x0 + i, mirror = (i) => S.w - 1 - i;
+  const bodyGroup = new THREE.Group();
+  bodyGroup.position.set(S.w % 2 ? -0.5 : 0, S.foot, S.d % 2 ? -0.5 : 0);
+  squash.add(bodyGroup);
+
+  // face: eyes are their own little 2×2 meshes so they can blink / change expression
+  const eyeY = Math.round(S.h * 0.5);
+  const gap = S.w % 2 ? 1 : 2;
+  const L = Math.floor((S.w - 4 - gap) / 2);
+  for (const [ei, i] of [L, mirror(L) - 1].entries()) {
+    const ex = col(i);
+    let fz = -99;
+    for (let dx = 0; dx < 2; dx++) for (let dy = 0; dy < 2; dy++) fz = Math.max(fz, body.frontAt(ex + dx, eyeY + dy) ?? -99);
+    // cheeks, just outside and below each eye
+    const cx = ei ? ex + 2 : ex - 1, cz = body.frontAt(cx, eyeY - 1);
+    if (cz !== null) body.set(cx, eyeY - 1, cz, pal.blush);
+    const open = new Vox();
+    open.set(0, 0, 0, pal.eye); open.set(1, 0, 0, pal.eye); open.set(1, 1, 0, pal.eye); open.set(0, 1, 0, pal.shine);
+    const shut = new Vox();
+    shut.set(0, 0, 0, pal.eye); shut.set(1, 0, 0, pal.eye);
+    const g = new THREE.Group();
+    const eyeOpts = { ink: false, shadow: false, layer: LAYER.face };
+    const mo = voxMesh(open, eyeOpts), ms = voxMesh(shut, eyeOpts);
+    ms.visible = false;
+    g.add(mo, ms);
+    g.position.set(ex, eyeY, fz + 0.75);
+    g.scale.z = 0.5;
+    bodyGroup.add(g);
+    parts.eyes.push({ open: mo, shut: ms });
+  }
+  // a tiny mouth between the eyes (two voxels wide on even widths so it stays centred)
+  for (const i of new Set([Math.floor((S.w - 1) / 2), Math.ceil((S.w - 1) / 2)])) {
+    const mz = body.frontAt(col(i), eyeY - 1);
+    if (mz !== null) body.set(col(i), eyeY - 1, mz, pal.dark);
+  }
+  bodyGroup.add(voxMesh(body));
+
+  // ears, on the top surface, pivoting at their base
+  const E = Math.max(1, Math.round(S.w * 0.2));
+  for (const [i, ex] of [col(E), col(mirror(E))].entries()) {
+    const top = body.topAt(ex, 0) ?? S.h - 1;
+    const ear = new Vox();
+    const len = S.earLen;
+    for (let y = 0; y < len; y++) {
+      ear.set(0, y, 0, y === len - 1 && S.ear === 'point' ? pal.accent : pal.body);
+      if (S.ear === 'point' && y < len - 1) ear.set(i ? -1 : 1, y, 0, pal.body);
+    }
+    const g = new THREE.Group();
+    g.position.set(ex + 0.5, top + 0.6, 0.5);
+    const m = voxMesh(ear, { layer: LAYER.part });
+    m.position.set(-0.5, 0, -0.5);
+    g.add(m);
+    bodyGroup.add(g);
+    parts.ears.push({ g, side: i ? 1 : -1, a: 0, v: 0 });
+  }
+
+  // tail, curling up from the back
+  if (S.tail) {
+    const tail = new Vox();
+    for (let i = 0; i < S.tail; i++) tail.set(0, Math.round(i * 0.7), -i, i === S.tail - 1 ? pal.accent : pal.body);
+    const ty = Math.round(S.h * 0.3), bz = body.backAt(0, ty) ?? -S.d / 2;
+    const g = new THREE.Group();
+    g.position.set(0.5, ty + 0.5, bz + 0.6);
+    const m = voxMesh(tail, { layer: LAYER.part });
+    m.position.set(-0.5, -0.5, -0.5);
+    g.add(m);
+    bodyGroup.add(g);
+    parts.tail = { g, a: 0, v: 0 };
+  }
+
+  // feet
+  if (S.foot) {
+    const feet = new Vox();
+    const fw = S.w >= 9 ? 2 : 1;
+    const F = Math.max(0, Math.round(S.w * 0.18));
+    const footCol = pal.pattern === 'socks' ? pal.accent : pal.dark;
+    for (const i of [F, mirror(F) - fw + 1]) {
+      for (let x = 0; x < fw; x++) for (let z = 0; z < 2; z++) feet.set(col(i + x), 0, z, footCol);
+    }
+    const m = voxMesh(feet, { layer: LAYER.part });
+    m.position.set(S.w % 2 ? -0.5 : 0, 0, S.d % 2 ? -0.5 : 0);
+    squash.add(m);
+  }
+  return parts;
+}
+
+// ---------------- renderer / scene ----------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// Software WebGL (OBS with "browser source hardware acceleration" off) can't keep up with shadows.
+let lowQuality = CFG.quality === 'low';
+if (!CFG.quality) {
+  try {
+    const gl = renderer.getContext(), ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+    if (/swiftshader|llvmpipe|software|basic render/i.test(name)) lowQuality = true;
+  } catch (e) {}
+}
+renderer.shadowMap.enabled = !lowQuality;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 1000);
+const camUp = new THREE.Vector3(0, Math.cos(PITCH), -Math.sin(PITCH));
+const camBack = new THREE.Vector3(0, Math.sin(PITCH), Math.cos(PITCH));
+
+scene.add(new THREE.HemisphereLight(0xfff4e8, 0x8a7aa8, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.9);
+sun.castShadow = !lowQuality;
+sun.shadow.camera.up.set(0, 0, -1);
+sun.shadow.mapSize.set(4096, 1024);
+sun.shadow.bias = -0.0005;
+sun.shadow.normalBias = 0.03;
+scene.add(sun, sun.target);
+
+const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: 0.22 }));
+floorMesh.rotation.x = -Math.PI / 2;
+floorMesh.receiveShadow = true;
+scene.add(floorMesh);
+
+// ---------------- physics world ----------------
+await RAPIER.init();
+const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
+world.timestep = STEP;
+const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+let walls = [];
+const B = { left: -50, right: 50 };  // current walls, in voxels
+
+function layout() {
+  const W = innerWidth, H = innerHeight;
+  renderer.setSize(W, H);
+  const hw = W / 2 / PX, hh = H / 2 / PX;
+  cam.left = -hw; cam.right = hw; cam.top = hh; cam.bottom = -hh;
+  // put the front edge of the floor strip at the ground line
+  const front = new THREE.Vector3(0, 0, DEPTH);
+  const shift = front.dot(camUp) - (-hh + CFG.ground / PX);
+  cam.position.copy(camBack).multiplyScalar(300).addScaledVector(camUp, shift);
+  cam.lookAt(cam.position.clone().sub(camBack));
+  cam.updateProjectionMatrix();
+
+  B.left = -hw + CFG.xmin / 100 * W / PX;
+  B.right = -hw + CFG.xmax / 100 * W / PX;
+  const cx = (B.left + B.right) / 2, span = B.right - B.left;
+
+  floorMesh.position.set(cx, 0, 0);
+  floorMesh.scale.set(span + 20, DEPTH * 2 + 20, 1);
+
+  sun.position.set(cx - 25, 80, 45);
+  sun.target.position.set(cx, 0, 0);
+  const sc = sun.shadow.camera;
+  sc.left = -span / 2 - 30; sc.right = span / 2 + 30; sc.top = 40; sc.bottom = -40;
+  sc.near = 1; sc.far = 250;
+  sc.updateProjectionMatrix();
+
+  for (const c of walls) world.removeCollider(c, false);
+  const wall = (x, y, z, hx, hy, hz) => world.createCollider(
+    RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setFriction(0.8), ground);
+  walls = [
+    wall(cx, -5, 0, span / 2 + 50, 5, DEPTH + 50),           // floor
+    wall(B.left - 5, 60, 0, 5, 80, DEPTH + 10),              // left
+    wall(B.right + 5, 60, 0, 5, 80, DEPTH + 10),             // right
+    wall(cx, 60, -DEPTH - 5, span / 2 + 10, 80, 5),           // back
+    wall(cx, 60, DEPTH + 5, span / 2 + 10, 80, 5),            // front
+  ];
+}
+layout();
+addEventListener('resize', layout);
+
+// ---------------- the pet ----------------
+const pal = makePalette(CFG.seed);
+const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+
+class Pet {
+  constructor(stage, x = 0) { this.build(stage, x, 30); }
+
+  build(stage, x, y) {
+    if (this.vis) scene.remove(this.vis.root);
+    if (this.body) world.removeRigidBody(this.body);
+    this.stage = stage;
+    this.vis = buildCritter(stage, pal);
+    scene.add(this.vis.root);
+    const S = this.S = this.vis.S;
+    this.hx = S.w / 2; this.hy = (S.h + S.foot) / 2; this.hz = S.d / 2;
+    const r = Math.min(this.hx, this.hy, this.hz) * 0.45;
+    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(x, y, 0).setAngularDamping(1.5).setCcdEnabled(true));
+    world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
+      .setDensity(1).setFriction(0.9).setRestitution(0.05), this.body);
+    const m = this.body.mass();
+    this.inertia = m * (S.w * S.w + S.h * S.h) / 12;
+    this.state = 'idle'; this.timer = rand(0.5, 1.5);
+    this.target = null; this.yaw = 0;
+    this.grounded = false; this.dazed = 0; this.crouch = 0;
+    this.sq = 0; this.sqV = 0; this.lastVy = 0;
+    this.blink = rand(2, 5);
+  }
+
+  pos() { return this.body.translation(); }
+
+  isGrounded() {
+    const p = this.pos();
+    tmpQ.copy(this.body.rotation());
+    const hit = world.castRay(new RAPIER.Ray(p, { x: 0, y: -1, z: 0 }), this.hy + 0.35, true,
+      undefined, undefined, undefined, this.body);
+    return !!hit;
+  }
+
+  // physics-rate brain + controller
+  step(dt) {
+    const S = this.S, b = this.body, p = this.pos(), v = b.linvel();
+    const wasGrounded = this.grounded;
+    this.grounded = this.isGrounded();
+    if (this.grounded && !wasGrounded) this.sqV -= clamp(-this.lastVy * 0.045, 0, 2.2); // landing squish
+    this.lastVy = v.y;
+
+    tmpQ.copy(b.rotation());
+    const up = tmpV.set(0, 1, 0).applyQuaternion(tmpQ);
+    const tilt = Math.acos(clamp(up.y, -1, 1));
+
+    // a hard enough tip-over leaves it dazed on its side for a moment
+    if (tilt > 1.0 && this.dazed <= 0 && !S.egg) this.dazed = 1.4;
+    if (this.dazed > 0) {
+      this.dazed -= dt;
+      if (this.dazed <= 0 && this.grounded) b.applyImpulse({ x: 0, y: b.mass() * 18, z: 0 }, true); // scramble up
+    }
+
+    // keep upright and turn toward the wanted yaw
+    b.resetTorques(false);
+    if (this.dazed <= 0) {
+      const w = b.angvel();
+      const kp = S.upright ?? 60, kd = 2 * Math.sqrt(kp) * 0.75;
+      const axis = tmpV2.copy(up).cross(UP); // |axis| = sin(tilt)
+      const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(tmpQ);
+      const yawErr = wrapAngle(this.yaw - Math.atan2(fwd.x, fwd.z));
+      const I = this.inertia;
+      b.addTorque({
+        x: I * (kp * axis.x - kd * w.x),
+        y: I * (40 * yawErr - 12 * w.y),
+        z: I * (kp * axis.z - kd * w.z),
+      }, true);
+    }
+
+    if (S.egg) return this.eggStep(dt);
+
+    // brain (placeholder until the needs/utility AI: wander and play)
+    this.timer -= dt;
+    if (this.state === 'idle') {
+      this.yaw += (0 - this.yaw) * Math.min(1, dt * 2);
+      if (this.timer <= 0) {
+        const ball = props.find(pr => pr.kind === 'ball');
+        if (ball && Math.random() < 0.45) {
+          const bp = ball.body.translation();
+          this.target = { x: bp.x + Math.sign(bp.x - p.x) * 2, z: bp.z };
+        } else {
+          const m = this.hx + 2;
+          this.target = { x: rand(B.left + m, B.right - m), z: rand(-DEPTH + this.hz + 1, DEPTH - this.hz - 1) };
+          if (Math.random() < 0.6) this.target.x = clamp(p.x + rand(-30, 30), B.left + m, B.right - m);
+        }
+        this.state = 'move';
+      }
+    } else if (this.state === 'move') {
+      const dx = this.target.x - p.x, dz = this.target.z - p.z, dist = Math.hypot(dx, dz);
+      // face where it's going, but never turn its back to the camera
+      if (dist > 0.5) this.yaw = Math.abs(dx) < 0.5 ? 0 : clamp(Math.atan2(dx, Math.max(dz, 0)), -1.3, 1.3);
+      if (dist < 2) { this.state = 'idle'; this.timer = rand(1, 4); }
+      else if (this.grounded && this.dazed <= 0 && tilt < 0.4) {
+        this.crouch += dt;
+        if (this.crouch > 0.14) {
+          this.crouch = 0;
+          const air = 2 * S.hopV / GRAVITY;
+          const hs = Math.min(S.hopS, dist / air);
+          const m = b.mass();
+          b.applyImpulse({ x: m * (dx / dist * hs - v.x), y: m * (S.hopV - v.y), z: m * (dz / dist * hs - v.z) }, true);
+          this.sqV += 3;
+        }
+      }
+    }
+  }
+
+  eggStep(dt) {
+    this.timer -= dt;
+    if (this.timer <= 0 && this.grounded) {
+      this.timer = rand(2, 6);
+      this.body.applyTorqueImpulse({ x: 0, y: 0, z: this.inertia * rand(-2.5, 2.5) }, true);
+    }
+  }
+
+  // render-rate visuals
+  update(dt) {
+    const b = this.body, p = this.pos(), v = b.linvel();
+    const R = this.vis.root;
+    tmpQ.copy(b.rotation());
+    R.quaternion.copy(tmpQ);
+    // body origin is the collider centre; the visual origin is the feet
+    R.position.set(p.x, p.y, p.z).add(tmpV.set(0, -this.hy, 0).applyQuaternion(tmpQ));
+
+    // squash & stretch spring
+    let target = this.grounded ? 0 : clamp(v.y * 0.004, -0.08, 0.12);
+    if (this.crouch > 0) target = -0.22;
+    this.sqV += ((target - this.sq) * 260 - this.sqV * 14) * dt;
+    this.sq = clamp(this.sq + this.sqV * dt, -0.4, 0.35);
+    const sy = 1 + this.sq, sxz = 1 / Math.sqrt(sy);
+    this.vis.squash.scale.set(sxz, sy, sxz);
+
+    // ears and tail lag behind vertical motion
+    const ay = (v.y - (this.prevVy ?? v.y)) / Math.max(dt, 1e-3);
+    this.prevVy = v.y;
+    for (const e of this.vis.ears) {
+      e.v += (-e.a * 180 - e.v * 10 + clamp(ay, -900, 900) * 0.004 * -e.side) * dt;
+      e.a = clamp(e.a + e.v * dt, -0.9, 0.9);
+      e.g.rotation.z = e.a;
+    }
+    const t = this.vis.tail;
+    if (t) {
+      t.v += (-t.a * 120 - t.v * 6 + clamp(ay, -900, 900) * 0.003 + Math.sin(performance.now() / 300) * 4) * dt;
+      t.a = clamp(t.a + t.v * dt, -1, 1);
+      t.g.rotation.x = t.a;
+    }
+
+    // blink
+    this.blink -= dt;
+    const closed = this.dazed > 0 || this.blink < 0;
+    if (this.blink < -0.12) this.blink = rand(2, 5.5);
+    for (const e of this.vis.eyes) { e.open.visible = !closed; e.shut.visible = closed; }
+  }
+}
+
+// ---------------- props ----------------
+const props = [];
+function dropBall(x) {
+  const r = 2.2;
+  const vox = new Vox(), cols = [0xff4d6d, 0xffffff, 0x3ab0ff, 0xffd23f];
+  for (let a = -3; a <= 2; a++) for (let b2 = -3; b2 <= 2; b2++) for (let c = -3; c <= 2; c++) {
+    const d = Math.hypot(a + 0.5, b2 + 0.5, c + 0.5);
+    if (d <= 2.9) vox.set(a, b2, c, cols[(Math.floor(Math.atan2(c + 0.5, a + 0.5) / (Math.PI / 2) + 4)) % 4]);
+  }
+  const mesh = voxMesh(vox);
+  const g = new THREE.Group();
+  mesh.scale.setScalar(r / 2.9);
+  g.add(mesh);
+  scene.add(g);
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+    .setTranslation(x ?? rand(B.left + 10, B.right - 10), 70, rand(-3, 3)).setCcdEnabled(true)
+    .setLinearDamping(0.15).setAngularDamping(0.4));
+  world.createCollider(RAPIER.ColliderDesc.ball(r).setDensity(0.12).setRestitution(0.65).setFriction(0.6), body);
+  props.push({ kind: 'ball', body, g });
+}
+
+// ---------------- loop ----------------
+const pet = new Pet(CFG.stage, (B.left + B.right) / 2);
+if (CFG.ball) dropBall();
+
+let debugLines = null;
+if (CFG.debug) {
+  debugLines = new THREE.LineSegments(new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false }));
+  debugLines.renderOrder = 99;
+  scene.add(debugLines);
+}
+const hud = document.getElementById('hud');
+
+function stepSim(dt) {
+  pet.step(dt);
+  world.step();
+  // anything that escaped the walls comes back in from above
+  for (const pr of [pet, ...props]) {
+    const p = pr.body.translation();
+    if (p.y < -30 || p.x < B.left - 5 || p.x > B.right + 5) {
+      pr.body.setTranslation({ x: clamp(p.x, B.left + 8, B.right - 8), y: 40, z: 0 }, true);
+      pr.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    }
+  }
+}
+
+// ?settle=N runs N seconds of simulation up front (screenshots, headless tests)
+for (let i = 0, n = num('settle', 0, 0, 600) / STEP; i < n; i++) { stepSim(STEP); if (i % 4 === 0) pet.update(STEP * 4); }
+
+let hidden = document.hidden, last = performance.now(), acc = 0, fps = 0;
+function setHidden(h) {
+  hidden = h;
+  // the time spent hidden goes to the life simulation later, never to the physics
+  last = performance.now(); acc = 0;
+}
+document.addEventListener('visibilitychange', () => setHidden(document.hidden));
+addEventListener('obsSourceVisibleChanged', e => setHidden(!(e.detail && e.detail.visible)));
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (hidden) return;
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  acc += dt;
+  let n = 0;
+  while (acc >= STEP && n < 6) { stepSim(STEP); acc -= STEP; n++; }
+  if (n === 6) acc = 0;
+
+  pet.update(dt);
+  for (const pr of props) {
+    const p = pr.body.translation();
+    pr.g.position.set(p.x, p.y, p.z);
+    pr.g.quaternion.copy(pr.body.rotation());
+  }
+  if (debugLines) {
+    const { vertices, colors } = world.debugRender();
+    debugLines.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+    debugLines.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+    const p = pet.pos();
+    hud.textContent = `fps ${fps.toFixed(0)}  quality ${lowQuality ? 'low' : 'high'}\n` +
+      `stage ${pet.stage}  seed ${CFG.seed}  pattern ${pal.pattern}\n` +
+      `state ${pet.state}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}\n` +
+      `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
+  }
+  renderer.render(scene, cam);
+}
+requestAnimationFrame(frame);
+
+// ---------------- testing API ----------------
+window.pet = {
+  hop() { pet.state = 'move'; const p = pet.pos(); pet.target = { x: clamp(p.x + rand(-20, 20), B.left + 6, B.right - 6), z: 0 }; },
+  knock(power = 1) {
+    const b = pet.body, m = b.mass(), s = Math.random() < 0.5 ? -1 : 1;
+    b.applyImpulse({ x: m * 25 * s * power, y: m * 30 * power, z: 0 }, true);
+    b.applyTorqueImpulse({ x: 0, y: 0, z: -s * pet.inertia * 9 * power }, true);
+  },
+  drop(kind = 'ball') { if (kind === 'ball') dropBall(); },
+  stage(s) { if (STAGES[s]) { const p = pet.pos(); pet.build(s, p.x, p.y + 6); } },
+};
+</script>
+</body>
+</html>
