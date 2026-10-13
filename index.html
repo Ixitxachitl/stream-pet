@@ -1764,12 +1764,15 @@ function dropFood(kind = ['apple', 'fish', 'cookie'][Math.floor(Math.random() * 
   return p;
 }
 // Food nobody eats goes off: untouched for 40 s on screen (or a half-eaten leftover for 90 s), it
-// vanishes in a little puff. Whatever the pet is busy eating is left alone.
+// vanishes in a little puff. The ball is put away the same way after 45 s without a kick, so it can't
+// sit stuck in a corner forever; a fresh one drops in next time it wants to play. Whatever the pet is
+// busy with is left alone.
 function spoilFood(dt) {
   for (const f of [...props]) {
-    if (f.kind !== 'food' || pet.action?.food === f) continue;
+    if (f.kind !== 'food' && f.kind !== 'ball') continue;
+    if (pet.action?.food === f || pet.action?.ball === f) continue;
     f.age = (f.age ?? 0) + dt;
-    if (f.age < (f.bitesLeft < f.bitesTotal ? 90 : 40)) continue;
+    if (f.age < (f.kind === 'ball' ? 45 : f.bitesLeft < f.bitesTotal ? 90 : 40)) continue;
     const q = f.pos();
     spawnBits(q.x, q.y, SPARKLE, 10, { vy: 8, spread: 8, size: 0.4, life: 1, grav: 0 });
     sfx('poof');
@@ -2045,6 +2048,7 @@ const ACTIONS = {
         p.face(a.dir);
         const m = ball.body.mass();
         ball.body.applyImpulse({ x: a.dir * m * rand(25, 45), y: m * rand(15, 40), z: 0 }, true);
+        ball.age = 0; // still in use
         sfx('hop');
         p.sqV += 2;
         N.fun = clamp(N.fun + 7, 0, 100);
