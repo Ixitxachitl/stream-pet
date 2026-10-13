@@ -12,8 +12,13 @@ python -m http.server 8000
 # then open http://localhost:8000/?debug=1&ball=1
 ```
 
-Useful URL parameters for now: `stage` (egg, baby, child, adult), `seed`, `size`, `ground`, `xmin`/`xmax`,
-`ball=1`, `debug=1`. The full list is at the top of [index.html](index.html).
+Hook it up to chat with `?channel=yourtwitch` (or `kick=`, `tiktok=1` for TikFinity, `youtube=` + `ytkey=`).
+Chat is optional: it makes the pet more sociable and changes how it grows up, but it looks after itself
+either way. Subs drop cake, bits rain coins and raids bring confetti.
+
+For testing: `debug=1`, `demo=1` (fake chat that doesn't count), `stage=` / `form=` for a throwaway pet,
+`gallery=1` to see every form (spoilers), `speed=` and `agerate=` to fast-forward. The full list is at
+the top of [index.html](index.html).
 
 ## Credits
 

@@ -9,7 +9,17 @@
   ------------------------------------------------------------
   Add as a Browser Source at your canvas size (e.g. 1920x1080). The background is transparent.
 
-  URL parameters (work in progress, the settings panel comes later):
+  Chat (all read anonymously, all optional; the pet never needs chat):
+    channel   Twitch channel          kick      Kick channel
+    tiktok    TikTok bridge: 1 = TikFinity on this PC, or a ws:// address
+    youtube   a live video ID or link (needs ytkey), or a ws:// bridge
+    ytkey     YouTube Data API v3 key ytpoll    seconds between YouTube checks (default 6)
+    ignore    extra bot names to ignore, comma separated
+    cmds      1 = chat can use !pet (hearts) and !pet stats
+    demo      1 = fake chat for trying it out (never counts toward how it grows up)
+    status    events (default), always or off: the little name and needs card
+
+  Other URL parameters:
     size      adult height on screen in px (default 160)
     ground    floor height in px from the bottom (default 0)
     xmin/xmax left/right walls in % of the width (default 0/100)
@@ -23,13 +33,17 @@
     agerate   how much faster it grows up (for testing)
     ball      1 = drop a ball in to play with
     drop      things to drop in at the start, for testing: drop=apple,fish,cookie,cake,poop,ball
+              (or stream events: raid, sub, bits, chat)
     debug     1 = collider wireframes + a status readout
     settle    seconds of simulation to run before the first frame (for screenshots)
     speed     life-clock speed: needs fall this many times faster (for testing)
     night     local hours it wants to sleep, e.g. 1-7 (default), or off
     set       start needs for testing, e.g. set=hunger:10,energy:5
 
-  window.pet.hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy') are there for testing.
+  Custom integrations (Streamer.bot, etc.) can call:
+    window.pet.chat(name, text), .sub(name, count), .bits(name, amount), .raid(name, viewers), .follow(name),
+    .feed(kind), .play(), .stats()
+  and for testing: .hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy'), .evolve(), .save()
 -->
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:transparent}
@@ -54,6 +68,18 @@
     color:#2a1f44;font:700 26px/1.2 "Comic Neue","Comic Sans MS",sans-serif;white-space:nowrap;pointer-events:none;
     box-shadow:0 4px 14px #0005;opacity:0;transition:opacity .4s}
   #banner.show{opacity:1;animation:pop .45s cubic-bezier(.3,1.6,.5,1)}
+  #status{position:fixed;transform:translate(-50%,-100%);min-width:150px;padding:8px 10px 9px;border-radius:12px;
+    background:#fffffff0;color:#2a1f44;font:700 15px/1.2 "Comic Neue","Comic Sans MS",sans-serif;pointer-events:none;
+    box-shadow:0 3px 12px #0004;opacity:0;transition:opacity .35s}
+  #status.show{opacity:1}
+  #status .s{font-size:11px;opacity:.7;margin-bottom:5px}
+  #status .bars div{display:flex;align-items:center;gap:5px;height:14px}
+  #status .bars b{font:11px/1 "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif;width:14px}
+  #status .bars i{display:block;height:6px;border-radius:3px;background:linear-gradient(90deg,#ff7a8a,#ffd23f 45%,#6ad08a);
+    box-shadow:inset 0 0 0 99px #0000;transition:width .5s}
+  #status .bars div::after{content:"";flex:1}
+  .float.heart{color:#ff5d8f;font-size:28px;text-shadow:0 2px 4px #0005}
+  .float.name{color:#fff;font-size:20px;text-shadow:0 2px 4px #000a,0 0 2px #000}
   .float{position:fixed;pointer-events:none;font:700 22px/1 "Comic Neue","Comic Sans MS",sans-serif;
     animation:floatUp 2.5s ease-out forwards}
   .float.zzz{color:#e8f0ff;text-shadow:0 2px 4px #0006}
@@ -73,6 +99,10 @@
 <div id="hud"></div>
 <div id="bubble"></div>
 <div id="banner"></div>
+<div id="status"><div class="n"></div><div class="s"></div><div class="bars">
+  <div data-k="hunger"><b>🍎</b><i></i></div><div data-k="energy"><b>⚡</b><i></i></div>
+  <div data-k="fun"><b>⚽</b><i></i></div><div data-k="hygiene"><b>🫧</b><i></i></div>
+  <div data-k="social"><b>💬</b><i></i></div></div></div>
 <script type="module">
 import * as THREE from 'three';
 import RAPIER from 'rapier';
@@ -93,6 +123,10 @@ const CFG = {
   ball: Q.get('ball') === '1',
   debug: Q.get('debug') === '1',
   speed: num('speed', 1, 0.1, 3600),
+  channel: Q.get('channel') || '', kick: Q.get('kick') || '', tiktok: Q.get('tiktok') || '',
+  youtube: Q.get('youtube') || '', ytkey: Q.get('ytkey') || '', ytpoll: num('ytpoll', 6, 2, 60),
+  demo: Q.get('demo') === '1', cmds: Q.get('cmds') === '1',
+  status: ['always', 'off'].includes(Q.get('status')) ? Q.get('status') : 'events',
 };
 if (CFG.xmax - CFG.xmin < 10) { CFG.xmin = 0; CFG.xmax = 100; }
 if (CFG.debug) document.body.classList.add('debug');
@@ -1984,6 +2018,7 @@ function stepCutscene(dt) {
       spawnBits(q.x, q.y, hatch ? [oldPal.shell, oldPal.accent] : [pal.body, pal.accent, ...SPARKLE], hatch ? 30 : 40,
         { vy: 20, spread: 18, size: 0.5, life: 1.8, grav: hatch ? 1 : 0.15 });
       c.swapped = true;
+      showStatus(7000);
       showBanner(
         hatch ? `Hatched! Say hi to ${save.name}` :
         c.next === 'adult' ? `${save.name} became ${/^[aeiou]/i.test(save.formName) ? 'an' : 'a'} ${save.formName}!` :
@@ -2071,6 +2106,299 @@ function placeBanner() {
   bannerEl.style.top = Math.max(40, sy) + 'px';
 }
 
+// ---------------- chat and stream events ----------------
+// Everything chat does is passive: it fills the social need, shapes traits, and gets reactions. The
+// pet never needs it. Demo chat (?demo=1) is for show only and never counts toward its traits.
+const BOTS = new Set(['nightbot', 'streamelements', 'streamlabs', 'moobot', 'fossabot', 'soundalerts', 'wizebot',
+  'sery_bot', 'kofistreambot', 'botrixoficial', 'commanderroot', ...(Q.get('ignore') || '').toLowerCase().split(',').filter(Boolean)]);
+const greets = [];                 // first-time chatters waiting for a wave
+const recentChat = [];             // message times, for spotting hype
+let demoing = false;               // true while demo chat is speaking: it doesn't count
+const counts = () => !demoing;
+
+function onChat({ name, text = '', platform = 'custom', emoteOnly = false }) {
+  if (!name || BOTS.has(String(name).toLowerCase())) return;
+  const T = save.traits, now = performance.now();
+  N.social = clamp(N.social + 3, 0, 100);
+  life.lastChat = save.t;
+  if (counts()) {
+    save.events.chat++;
+    T.social += 0.02;
+    // remember who's chatted (hashed, capped) to know a first-timer, and how many there have been
+    save.seen ??= [];
+    const h = hashStr(platform + ':' + String(name).toLowerCase());
+    if (!save.seen.includes(h)) {
+      save.seen.push(h); if (save.seen.length > 5000) save.seen.shift();
+      save.events.chatters++;
+      if (save.stage !== 'egg') { greets.push(String(name).slice(0, 24)); if (greets.length > 3) greets.shift(); }
+    }
+  } else if (Math.random() < 0.15 && save.stage !== 'egg') greets.push(String(name).slice(0, 24));
+  // a burst of messages or emote spam gets it hyped
+  recentChat.push(now);
+  while (recentChat.length && now - recentChat[0] > 20000) recentChat.shift();
+  if (recentChat.length >= 10 || emoteOnly) {
+    life.hype = Math.min(0.8, (life.hype ?? 0) + (emoteOnly ? 0.1 : 0.05));
+    if (counts()) T.hyped += 0.03;
+  }
+  if (!pet.asleep && pet.action?.name === 'idle' && Math.random() < 0.4) pet.face(Math.random() < 0.5 ? -1 : 1); // glances over
+  if (CFG.cmds && /^!pet\b/i.test(text)) petCommand(text.slice(4).trim().toLowerCase(), name);
+}
+
+function petCommand(arg, name) {
+  const q = pet.pos();
+  if (arg === 'stats') { showStatus(6000); return; }
+  for (let i = 0; i < 3; i++) setTimeout(() => floatText(q.x + rand(-3, 3), q.y + pet.hy + 2, '♥', 'heart'), i * 180);
+  if (!pet.asleep) pet.mood('happy', 1.5);
+}
+
+function onSub({ name, count = 1 }) {
+  if (counts()) { save.events.subs += count; save.traits.generous += 0.3 * count; }
+  N.social = clamp(N.social + 10, 0, 100);
+  if (save.stage === 'egg') return;
+  // a treat rains down
+  for (let i = 0; i < Math.min(count, 5); i++) setTimeout(() => dropFood('cake', spotNear(pet.pos().x, rand(-20, 20))), i * 400);
+  showBubble('🎉');
+}
+
+function onBits({ name, amount = 100 }) {
+  if (counts()) { save.events.bits += amount; save.traits.generous += amount / 500; }
+  N.fun = clamp(N.fun + Math.min(30, amount / 50), 0, 100);
+  // coins rain from the top of the screen
+  const n = clamp(Math.round(Math.log10(Math.max(10, amount)) * 4), 3, 14);
+  for (let i = 0; i < n; i++) {
+    setTimeout(() => spawnBits(rand(B.left + 5, B.right - 5), screenTop(), [0xffd23f, 0xf2a33a, 0xfff3a0], 1,
+      { vx: 0, vy: -10, spread: 4, size: 0.9, life: 4, grav: 0.6 }), i * 90);
+  }
+}
+
+function onRaid({ name, viewers = 1 }) {
+  if (counts()) {
+    save.events.raids++;
+    save.traits.hyped += 1 + Math.log10(Math.max(1, viewers));
+    if (save.stage === 'egg') (save.flags ??= {}).raidHatch = true;
+  }
+  N.social = clamp(N.social + 25, 0, 100);
+  life.hype = 0.8;
+  if (name) showBanner(`${name} is raiding! 🎊`);
+  // confetti everywhere, scaled by raid size
+  const n = clamp(Math.round(20 + Math.sqrt(viewers) * 6), 20, 160), colors = [0xff4d6d, 0x3ab0ff, 0xffd23f, 0x5cc04a, 0xb76bff, 0xffffff];
+  for (let i = 0; i < n; i++) {
+    setTimeout(() => spawnBits(rand(B.left, B.right), screenTop() + rand(0, 5), colors, 1,
+      { vx: rand(-4, 4), vy: -5, spread: 3, size: 0.6, life: 5, grav: 0.18 }), i * 15);
+  }
+  if (save.stage === 'egg') return;
+  if (pet.asleep && pet.action) { pet.action.def.end?.(pet, pet.action); pet.action = null; } // that'll wake anyone up
+  setTimeout(() => window.pet.knock(0.7), 300);
+}
+
+function onFollow({ name }) {
+  N.social = clamp(N.social + 4, 0, 100);
+  if (counts()) save.traits.social += 0.05;
+  const q = pet.pos();
+  floatText(q.x, q.y + pet.hy + 2, '♥', 'heart');
+}
+
+// Wave hello to a first-time chatter, with their name over its head.
+ACTIONS.greet = {
+  score: () => (greets.length && !(pet.asleep && isNight()) ? 0.7 : 0),
+  start(p, a) {
+    a.who = greets.shift();
+    p.face(0); p.expr = 'happy';
+    const q = p.pos();
+    floatText(q.x, q.y + p.hy + 3, a.who, 'name');
+    if (p.grounded) p.body.applyImpulse({ x: 0, y: p.body.mass() * p.S.hopV * 0.5, z: 0 }, true);
+  },
+  step(p, dt, a) {
+    for (const e of p.vis.anim) if (e.motion === 'loose') e.v += Math.sin(a.t * 16) * 30 * dt * (e.side || 1);
+    return a.t > 1.6;
+  },
+  end(p) { p.expr = 'open'; N.social = clamp(N.social + 5, 0, 100); },
+};
+
+// ---- Twitch (anonymous IRC over WebSocket) ----
+function parseTags(raw) {
+  const o = {};
+  const un = v => v.replace(/\\(.)/g, (_, c) => ({ s: ' ', ':': ';', '\\': '\\', r: '\r', n: '\n' }[c] ?? c));
+  raw.split(';').forEach(kv => { const i = kv.indexOf('='); o[kv.slice(0, i)] = un(kv.slice(i + 1)); });
+  return o;
+}
+function connectTwitch(channel) {
+  const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags twitch.tv/commands');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + Math.floor(10000 + Math.random() * 80000));
+    ws.send('JOIN #' + channel);
+  };
+  ws.onmessage = (ev) => {
+    for (const line of ev.data.split('\r\n')) {
+      if (!line) continue;
+      if (line.startsWith('PING')) { ws.send('PONG :tmi.twitch.tv'); continue; }
+      const m = /^(?:@(\S+) )?:([^!\s]+)![^ ]+ PRIVMSG #\S+ :(.*)$/.exec(line);
+      if (m) {
+        const tags = m[1] ? parseTags(m[1]) : {}, name = tags['display-name'] || m[2];
+        onChat({ name, text: m[3], platform: 'twitch', emoteOnly: tags['emote-only'] === '1' });
+        if (+tags.bits > 0) onBits({ name, amount: +tags.bits });
+        continue;
+      }
+      const u = /^@(\S+) :tmi\.twitch\.tv USERNOTICE /.exec(line);
+      if (u) {
+        const t = parseTags(u[1]), id = t['msg-id'], name = t['display-name'] || t.login;
+        if (['sub', 'resub', 'subgift', 'anonsubgift'].includes(id)) onSub({ name, count: 1 });
+        else if (['submysterygift', 'anonsubmysterygift'].includes(id)) onSub({ name, count: +t['msg-param-mass-gift-count'] || 1 });
+        else if (id === 'raid') onRaid({ name: t['msg-param-displayName'] || name, viewers: +t['msg-param-viewerCount'] || 1 });
+      }
+    }
+  };
+  ws.onclose = () => setTimeout(() => connectTwitch(channel), 3000);
+}
+
+// ---- Kick (anonymous, Kick's public Pusher chat socket) ----
+const KICK_PUSHER = 'wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false';
+async function connectKick(slug) {
+  let chatroom;
+  try {
+    const r = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`);
+    chatroom = (await r.json()).chatroom?.id;
+    if (!chatroom) throw new Error('no chatroom');
+  } catch (e) { console.warn('[pet] Kick channel lookup failed for', slug, e); return setTimeout(() => connectKick(slug), 30000); }
+  kickSocket(chatroom);
+}
+function kickSocket(chatroom) {
+  const ws = new WebSocket(KICK_PUSHER);
+  ws.onmessage = (ev) => {
+    let o; try { o = JSON.parse(ev.data); } catch { return; }
+    if (o.event === 'pusher:connection_established') {
+      ws.send(JSON.stringify({ event: 'pusher:subscribe', data: { auth: '', channel: `chatrooms.${chatroom}.v2` } }));
+      return;
+    }
+    if (o.event === 'pusher:ping') { ws.send(JSON.stringify({ event: 'pusher:pong', data: {} })); return; }
+    let d; try { d = typeof o.data === 'string' ? JSON.parse(o.data) : o.data; } catch { return; }
+    if (!d) return;
+    const ev2 = String(o.event).split('\\').pop();
+    if (ev2 === 'ChatMessageEvent') {
+      const text = (d.content || '').replace(/\[emote:\d+:([^\]]+)\]/g, '$1');
+      onChat({ name: d.sender?.username, text, platform: 'kick', emoteOnly: /^(\s*\[emote:[^\]]+\]\s*)+$/.test(d.content || '') });
+    } else if (ev2 === 'SubscriptionEvent') onSub({ name: d.username, count: 1 });
+    else if (ev2 === 'GiftedSubscriptionsEvent') onSub({ name: d.gifter_username, count: (d.gifted_usernames || []).length || 1 });
+    else if (ev2 === 'StreamHostEvent') onRaid({ name: d.host_username, viewers: +d.number_viewers || 1 });
+  };
+  ws.onclose = () => setTimeout(() => kickSocket(chatroom), 3000);
+  ws.onerror = () => {};
+}
+
+// ---- WebSocket bridges (TikFinity for TikTok, or any bridge for YouTube) ----
+function connectBridge(url, platform) {
+  let ws;
+  try { ws = new WebSocket(url); } catch (e) { return setTimeout(() => connectBridge(url, platform), 5000); }
+  ws.onmessage = (ev) => {
+    let o; try { o = JSON.parse(ev.data); } catch { return; }
+    const type = (o.event || o.type || '').toString().toLowerCase(), d = o.data || o;
+    const name = d.nickname || d.uniqueId || d.displayName || d.chatname || d.user?.nickname || d.user?.uniqueId || d.user?.name || d.username;
+    if (!type || ['chat', 'comment', 'message', 'chatmessage'].includes(type)) {
+      const text = d.comment || d.message || d.text || d.chatmessage;
+      if (name && typeof text === 'string') onChat({ name, text, platform });
+    } else if (type === 'gift') {
+      if (d.giftType === 1 && !d.repeatEnd) return; // streak still going; count it once at the end
+      onBits({ name, amount: (d.diamondCount || 1) * (d.repeatCount || 1) * 5 });
+    } else if (type === 'subscribe' || type === 'member') onSub({ name, count: 1 });
+    else if (type === 'follow') onFollow({ name });
+    else if (type === 'raid') onRaid({ name, viewers: +d.viewers || +d.viewerCount || 1 });
+  };
+  ws.onclose = () => setTimeout(() => connectBridge(url, platform), 3000);
+  ws.onerror = () => {};
+}
+
+// ---- YouTube (Data API v3 polling) ----
+async function connectYouTube(videoId, key) {
+  const API = 'https://www.googleapis.com/youtube/v3/';
+  const retry = () => setTimeout(() => connectYouTube(videoId, key), 30000);
+  let chatId;
+  try {
+    const r = await fetch(`${API}videos?part=liveStreamingDetails&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(key)}`);
+    chatId = (await r.json()).items?.[0]?.liveStreamingDetails?.activeLiveChatId;
+    if (!chatId) return retry();
+  } catch (e) { return retry(); }
+  let pageToken = '', first = true;
+  const poll = async () => {
+    let wait = CFG.ytpoll * 1000;
+    try {
+      const r = await fetch(`${API}liveChat/messages?liveChatId=${encodeURIComponent(chatId)}&part=snippet,authorDetails&maxResults=200&key=${encodeURIComponent(key)}${pageToken ? '&pageToken=' + pageToken : ''}`);
+      const j = await r.json();
+      if (j.error) { if (r.status === 403 || r.status === 404) return retry(); wait = 15000; }
+      else {
+        pageToken = j.nextPageToken || pageToken;
+        wait = Math.max(wait, j.pollingIntervalMillis || 0);
+        if (!first) {
+          (j.items || []).forEach((it, i) => setTimeout(() => {
+            const sn = it.snippet || {}, name = it.authorDetails?.displayName;
+            if (sn.type === 'superChatEvent' || sn.type === 'superStickerEvent') onBits({ name, amount: Math.round((sn.superChatDetails?.amountMicros || sn.superStickerDetails?.amountMicros || 1e6) / 1e4) });
+            else if (sn.type === 'newSponsorEvent' || sn.type === 'memberMilestoneChatEvent') onSub({ name, count: 1 });
+            else if (sn.type === 'membershipGiftingEvent') onSub({ name, count: sn.membershipGiftingDetails?.giftMembershipsCount || 1 });
+            else if (sn.displayMessage) onChat({ name, text: sn.displayMessage, platform: 'youtube' });
+          }, i / Math.max(1, j.items.length) * wait * 0.8));
+        }
+        first = false; // skip the backlog on connect
+      }
+    } catch (e) { wait = 15000; }
+    setTimeout(poll, wait);
+  };
+  poll();
+}
+const ytId = (v) => (/(?:v=|youtu\.be\/|live\/)([\w-]{11})/.exec(v) || [])[1] || v;
+
+// ---- demo chat: fake chatters and the odd event, for trying it out ----
+function runDemo() {
+  const names = ['mochi_fan', 'PixelPaws', 'lofi_luna', 'bean_counter', 'GlowstickGary', 'voxel_vic', 'sleepy_sam', 'hype_hana'];
+  const lines = ['hi pet!', 'so cute', 'look at it go', 'lol', 'feed it!!', 'aww', 'PogChamp', 'is it sleeping?', 'hello hello'];
+  const say = () => {
+    demoing = true;
+    onChat({ name: names[Math.floor(Math.random() * names.length)], text: lines[Math.floor(Math.random() * lines.length)], platform: 'demo' });
+    const r = Math.random();
+    if (r < 0.03) onSub({ name: 'PixelPaws' });
+    else if (r < 0.06) onBits({ name: 'bean_counter', amount: 100 });
+    else if (r < 0.07) onRaid({ name: 'voxel_vic', viewers: 25 });
+    demoing = false;
+    setTimeout(say, rand(1500, 6000));
+  };
+  setTimeout(say, 2000);
+}
+
+function startChat() {
+  if (CFG.channel) connectTwitch(CFG.channel.toLowerCase().replace(/^#/, ''));
+  if (CFG.kick) connectKick(CFG.kick.toLowerCase());
+  if (CFG.tiktok) connectBridge(CFG.tiktok === '1' ? 'ws://localhost:21213/' : CFG.tiktok, 'tiktok');
+  if (CFG.youtube) {
+    if (/^wss?:\/\//.test(CFG.youtube)) connectBridge(CFG.youtube, 'youtube');
+    else if (CFG.ytkey) connectYouTube(ytId(CFG.youtube), CFG.ytkey);
+  }
+  if (CFG.demo) runDemo();
+}
+
+// ---- status card: name, stage and needs, over the pet ----
+// ?status=events (default) shows it for a while on big moments and !pet stats, always keeps it up,
+// off never shows it. It never says anything about evolution.
+const statusEl = document.getElementById('status');
+let statusUntil = CFG.status === 'always' ? Infinity : 0, statusTick = 0;
+function showStatus(ms = 6000) { if (CFG.status !== 'off') statusUntil = Math.max(statusUntil, performance.now() + ms); }
+const STAGE_NAMES = { egg: 'Egg', baby: 'Baby', child: 'Child', teen: 'Teen', adult: 'Adult', elder: 'Elder' };
+function placeStatus() {
+  const on = performance.now() < statusUntil;
+  statusEl.classList.toggle('show', on);
+  if (!on) return;
+  if (performance.now() > statusTick) {
+    statusTick = performance.now() + 500;
+    const age = ageHours(), ageTxt = age < 1 ? Math.round(age * 60) + ' min' : age.toFixed(age < 10 ? 1 : 0) + ' h';
+    statusEl.querySelector('.n').textContent = save.name ?? 'Egg';
+    statusEl.querySelector('.s').textContent = `${save.stage === 'adult' || save.stage === 'elder' ? save.formName + ' · ' : ''}${STAGE_NAMES[save.stage]} · ${ageTxt}`;
+    statusEl.querySelector('.bars').style.display = save.stage === 'egg' ? 'none' : '';
+    for (const [k, v] of Object.entries(N)) statusEl.querySelector(`[data-k="${k}"] i`).style.width = v.toFixed(0) + '%';
+  }
+  const q = pet.pos(), [sx, sy] = toScreen(q.x, q.y + pet.hy + 2.5);
+  statusEl.style.left = clamp(sx, 110, innerWidth - 110) + 'px';
+  statusEl.style.top = Math.max(110, sy) + 'px';
+}
+
 // ---------------- broom ----------------
 // The auto-clean: a little broom drops in next to the poop, sweeps a few times and it's gone.
 const effects = [];
@@ -2147,11 +2475,17 @@ if (!TESTING) {
   setInterval(writeSave, 30000);
   addEventListener('pagehide', writeSave);
 }
+startChat();
 if (CFG.ball) dropBall();
 function dropThing(kind = 'ball') {
   if (kind === 'ball') dropBall();
   else if (kind === 'poop') dropPoop(pet.pos().x + (pet.facing ? -pet.facing * 6 : 6), 10);
   else if (kind === 'food' || FOODS[kind]) dropFood(FOODS[kind] ? kind : undefined);
+  // stream events, for testing
+  else if (kind === 'raid') onRaid({ name: 'TestRaider', viewers: 40 });
+  else if (kind === 'sub') onSub({ name: 'TestSubber', count: 1 });
+  else if (kind === 'bits') onBits({ name: 'TestCheerer', amount: 500 });
+  else if (kind === 'chat') onChat({ name: 'test_chatter', text: 'hi!' });
 }
 for (const k of (Q.get('drop') || '').split(',').filter(Boolean)) dropThing(k);
 
@@ -2212,6 +2546,7 @@ function frame(now) {
   updateBits(dt);
   placeBubble();
   placeBanner();
+  placeStatus();
   if (debugLines) {
     const { vertices, colors } = world.debugRender();
     debugLines.geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
@@ -2232,6 +2567,14 @@ requestAnimationFrame(frame);
 
 // ---------------- testing API ----------------
 window.pet = {
+  chat: (name, text = '') => onChat({ name, text }),
+  sub: (name, count = 1) => onSub({ name, count }),
+  bits: (name, amount = 100) => onBits({ name, amount }),
+  raid: (name, viewers = 1) => onRaid({ name, viewers }),
+  follow: (name) => onFollow({ name }),
+  feed(kind) { if (save.stage !== 'egg') dropFood(FOODS[kind] ? kind : undefined, spotNear(pet.pos().x, rand(-15, 15))); },
+  play() { if (save.stage !== 'egg') startAction(pet, 'play'); },
+  stats() { showStatus(6000); return { name: save.name, stage: save.stage, age: ageHours(), ...N, health: life.health }; },
   hop() { startAction(pet, 'wander'); },
   do(name) { if (ACTIONS[name]) startAction(pet, name); },
   set(k, v) { if (k in N) N[k] = clamp(v, 0, 100); else if (k === 'health') life.health = clamp(v, 0, 100); },
