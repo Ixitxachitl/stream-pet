@@ -15,12 +15,12 @@
     xmin/xmax left/right walls in % of the width (default 0/100)
     seed      look of the pet (colours, pattern); random if not given
     stage     egg, baby, child or adult (default baby, until the life cycle exists)
-    quality   high or low (default: high, low on software rendering)
+    quality   high or low (default: high, low on software rendering; low drops the outlines)
     ball      1 = drop a ball in to play with
     debug     1 = collider wireframes + a status readout
     settle    seconds of simulation to run before the first frame (for screenshots)
 
-  window.pet.hop(), .knock(), .drop('ball'), .stage('adult') are there for testing.
+  window.pet.hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy') are there for testing.
 -->
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:transparent}
@@ -68,8 +68,10 @@ if (CFG.debug) document.body.classList.add('debug');
 const PX = CFG.size / 12;      // screen px per voxel
 const GRAVITY = 160;           // voxels / s²
 const STEP = 1 / 60;
-const DEPTH = 9;               // half-depth of the floor strip, in voxels
-const PITCH = 22 * Math.PI / 180;
+// The look is "almost 2D": a nearly front-on camera, and everything moves and tips over only in the
+// screen plane (z is locked to 0). The voxels still give it depth and lighting.
+const PITCH = 6 * Math.PI / 180;
+const FACE_YAW = 0.42;         // how far it turns toward where it's going (radians)
 
 // ---------------- random ----------------
 function hashStr(s) {
@@ -206,10 +208,10 @@ INK_MAT.onBeforeCompile = (sh) => {
 const INK = 0.28; // outline thickness in voxels
 
 // A mesh for a voxel grid, with an inverted-hull ink outline like the comic overlays.
-function voxMesh(vox, { ink = true, shadow = true, layer = LAYER.body } = {}) {
+// Low quality (software rendering) skips the outlines, which halves the draw work.
+function voxMesh(vox, { ink = !lowQuality, layer = LAYER.body } = {}) {
   const geo = meshVox(vox);
   const mesh = new THREE.Mesh(geo, VOX_MATS[layer]);
-  mesh.castShadow = shadow;
   if (ink) {
     const b = geo.boundingBox, c = new THREE.Vector3(), s = new THREE.Vector3();
     b.getCenter(c); b.getSize(s);
@@ -242,11 +244,24 @@ function makePalette(seed) {
   };
 }
 
+// ---------------- recipes ----------------
+// A critter is a recipe: a body, plus parts plugged into sockets that the body works out from its own
+// shape. Every stage is a recipe, and so is every adult form (see FORMS). Recipes are plain JSON so a
+// save can keep the exact one its pet was built from.
 const STAGES = {
-  egg:   { egg: true, w: 7, h: 9, d: 7, foot: 0, upright: 40 },
-  baby:  { w: 7, h: 6, d: 6, foot: 1, ear: 'nub', earLen: 1, tail: 0, hopV: 24, hopS: 13, upright: 90 },
-  child: { w: 8, h: 7, d: 7, foot: 1, ear: 'nub', earLen: 2, tail: 2, hopV: 28, hopS: 15, upright: 130 },
-  adult: { w: 10, h: 8, d: 8, foot: 1, ear: 'point', earLen: 3, tail: 4, hopV: 32, hopS: 17, upright: 150 },
+  egg:   { body: { type: 'egg', w: 7, h: 9, d: 7 } },
+  baby:  { body: { type: 'round', w: 7, h: 6, d: 6 }, ears: { type: 'nub', len: 1 }, feet: { type: 'stubby' },
+           eyes: 'round', mouth: 'dot' },
+  child: { body: { type: 'round', w: 8, h: 7, d: 7 }, ears: { type: 'nub', len: 2 }, tail: { type: 'curl', len: 2 },
+           feet: { type: 'stubby' }, eyes: 'round', mouth: 'dot' },
+  adult: { body: { type: 'round', w: 10, h: 8, d: 8 }, ears: { type: 'point', len: 3 }, tail: { type: 'curl', len: 4 },
+           feet: { type: 'stubby' }, eyes: 'round', mouth: 'dot' },
+};
+
+// Body shapes: parameters for blob(). flat squashes the bottom half, fill > 1 fills out the corners,
+// taper > 0 narrows the top (< 0 widens it, like a slumped blob).
+const BODIES = {
+  round:  { flat: 0.35, fill: 1.08, taper: 0 },
 };
 
 function blob(w, h, d, paint, { flat = 0.35, fill = 1.08, taper = 0 } = {}) {
@@ -272,12 +287,101 @@ function patternPainter(pal, base) {
   };
 }
 
-function buildCritter(stageName, pal) {
-  const S = STAGES[stageName];
+// ---------------- parts ----------------
+// Small parts are drawn as rows of characters, top row first, in the x/y plane. `map` turns a
+// character into a colour; '.' and ' ' are empty.
+function flat(rowsTopFirst, map, z = 0) {
+  const vox = new Vox(), n = rowsTopFirst.length;
+  rowsTopFirst.forEach((row, r) => [...row].forEach((ch, x) => {
+    if (map[ch] !== undefined) vox.set(x, n - 1 - r, z, map[ch]);
+  }));
+  return vox;
+}
+function mirrorVox(vox) {
+  const out = new Vox();
+  for (const [x, y, z, c] of vox.each()) out.set(-x - 1, y, z, c);
+  return out;
+}
+
+// Ears / horns sit on top of the head. Each generator draws the RIGHT (+x) one, with its base at
+// y = 0 around x = 0 and "inward" toward -x; the left one is a mirror image.
+// motion: how the part reacts to hops. loose = floppy spring, stiff = barely moves.
+const EARS = {
+  nub(p, pal) {
+    const vox = new Vox();
+    for (let y = 0; y < p.len; y++) vox.set(0, y, 0, pal.body);
+    return { vox, motion: 'loose' };
+  },
+  point(p, pal) {
+    const vox = new Vox();
+    for (let y = 0; y < p.len; y++) {
+      vox.set(0, y, 0, y === p.len - 1 ? pal.accent : pal.body);
+      if (y < p.len - 1) vox.set(-1, y, 0, pal.body);
+    }
+    return { vox, motion: 'loose' };
+  },
+};
+
+// Tails leave the back of the body going toward -z, with their base voxel at the origin.
+const TAILS = {
+  curl(p, pal) {
+    const vox = new Vox();
+    for (let i = 0; i < p.len; i++) vox.set(0, Math.round(i * 0.7), -i, i === p.len - 1 ? pal.accent : pal.body);
+    return { vox, motion: 'tail' };
+  },
+};
+
+// Feet are built against the body grid (they need its width), and report how tall they are.
+const FEET = {
+  stubby(S, pal, col, mirror) {
+    const vox = new Vox();
+    const fw = S.w >= 9 ? 2 : 1;
+    const F = Math.max(0, Math.round(S.w * 0.18));
+    const c = pal.pattern === 'socks' ? pal.accent : pal.dark;
+    for (const i of [F, mirror(F) - fw + 1]) {
+      for (let x = 0; x < fw; x++) for (let z = 0; z < 2; z++) vox.set(col(i + x), 0, z, c);
+    }
+    return { vox, h: 1 };
+  },
+};
+
+// Eyes: one drawing per expression, for the RIGHT eye. k = pupil, w = shine. Expressions listed in
+// `mirrored` are flipped for the left eye (slanted ones); the rest are drawn the same on both sides,
+// so the shine is on the same side of both eyes.
+const EYES = {
+  round: {
+    w: 2, h: 2, mirrored: ['sad'],
+    open:  ['wk', 'kk'],
+    shut:  ['..', 'kk'],
+    happy: ['kk', '..'],
+    sad:   ['k.', '.k'],
+  },
+};
+const EXPRESSIONS = ['open', 'shut', 'happy', 'sad'];
+
+// Mouths are painted onto the body's front surface. Offsets are [dx, dy] from the centre column(s)
+// at the mouth row: negative dx counts from the left centre column, positive from the right one.
+const MOUTHS = {
+  dot: { k: [[0, 0]] },
+};
+
+// How a recipe moves: bigger critters hop higher and further, and hold themselves up more firmly.
+function motionFor(recipe) {
+  const { w, h } = recipe.body;
+  if (recipe.body.type === 'egg') return { upright: 40 };
+  return { hopV: 12 + 2.5 * h, hopS: 7 + w, upright: 20 * h - 30 };
+}
+
+function buildCritter(recipe, pal) {
+  const RB = recipe.body;
+  const S = { w: RB.w, h: RB.h, d: RB.d, foot: 0, egg: RB.type === 'egg', ...motionFor(recipe) };
   const root = new THREE.Group();   // follows the physics body; origin at the feet
   const squash = new THREE.Group(); // squash & stretch, pivot at the feet
   root.add(squash);
   const parts = { root, squash, ears: [], tail: null, eyes: [], S };
+  parts.setExpr = (name) => {
+    for (const e of parts.eyes) for (const [k, m] of Object.entries(e.m)) m.visible = k === (name in e.m ? name : 'open');
+  };
 
   if (S.egg) {
     // round slices, widest a bit below the middle
@@ -293,98 +397,97 @@ function buildCritter(stageName, pal) {
         vox.set(x, y, z, spot ? pal.accent : pal.shell);
       }
     }
-    const m = voxMesh(vox);
-    squash.add(m);
+    squash.add(voxMesh(vox));
     return parts;
   }
 
-  // body
-  const bellyPaint = (nx, ny, nz) => (nz > 0.3 && ny < 0.25 && Math.abs(nx) < 0.62 ? pal.belly : pal.body);
-  const body = blob(S.w, S.h, S.d, patternPainter(pal, bellyPaint));
-  // Placement below works in column indices 0..w-1 and mirrors i ↔ w-1-i, so faces stay symmetric
-  // for odd and even widths. col(i) turns an index into the body's x coordinate.
+  // Placement works in column indices 0..w-1 and mirrors i ↔ w-1-i, so faces stay symmetric for odd
+  // and even widths. col(i) turns an index into the body's x coordinate.
   const x0 = -Math.floor(S.w / 2), col = (i) => x0 + i, mirror = (i) => S.w - 1 - i;
+  const bellyPaint = (nx, ny, nz) => (nz > 0.3 && ny < 0.25 && Math.abs(nx) < 0.62 ? pal.belly : pal.body);
+  const body = blob(S.w, S.h, S.d, patternPainter(pal, bellyPaint), BODIES[RB.type] ?? BODIES.round);
+
+  const feet = recipe.feet && FEET[recipe.feet.type]?.(S, pal, col, mirror);
+  S.foot = feet ? feet.h : 0;
+  if (feet) {
+    const m = voxMesh(feet.vox, { layer: LAYER.part });
+    m.position.set(S.w % 2 ? -0.5 : 0, 0, S.d % 2 ? -0.5 : 0);
+    squash.add(m);
+  }
+
   const bodyGroup = new THREE.Group();
   bodyGroup.position.set(S.w % 2 ? -0.5 : 0, S.foot, S.d % 2 ? -0.5 : 0);
   squash.add(bodyGroup);
 
-  // face: eyes are their own little 2×2 meshes so they can blink / change expression
-  const eyeY = Math.round(S.h * 0.5);
+  // Puts a part's mesh on a socket. origin is the point in the part's own voxel space that should
+  // land on the socket; the returned group is the pivot that animation rotates.
+  const attach = (vox, socket, origin, layer = LAYER.part, opts = {}) => {
+    const g = new THREE.Group();
+    g.position.set(...socket);
+    const m = voxMesh(vox, { layer, ...opts });
+    m.position.set(-origin[0], -origin[1], -origin[2]);
+    g.add(m);
+    bodyGroup.add(g);
+    return g;
+  };
+
+  // face
+  const E = EYES[recipe.eyes] ?? EYES.round;
+  const eyeY = Math.round(S.h * 0.5) - (E.h > 2 ? 1 : 0);
   const gap = S.w % 2 ? 1 : 2;
-  const L = Math.floor((S.w - 4 - gap) / 2);
-  for (const [ei, i] of [L, mirror(L) - 1].entries()) {
+  const L = Math.floor((S.w - 2 * E.w - gap) / 2);
+  const eyeMap = { k: pal.eye, w: pal.shine };
+  for (const [side, i] of [[-1, L], [1, mirror(L) - E.w + 1]]) {
     const ex = col(i);
     let fz = -99;
-    for (let dx = 0; dx < 2; dx++) for (let dy = 0; dy < 2; dy++) fz = Math.max(fz, body.frontAt(ex + dx, eyeY + dy) ?? -99);
+    for (let dx = 0; dx < E.w; dx++) for (let dy = 0; dy < E.h; dy++) fz = Math.max(fz, body.frontAt(ex + dx, eyeY + dy) ?? -99);
     // cheeks, just outside and below each eye
-    const cx = ei ? ex + 2 : ex - 1, cz = body.frontAt(cx, eyeY - 1);
+    const cx = side > 0 ? ex + E.w : ex - 1, cz = body.frontAt(cx, eyeY - 1);
     if (cz !== null) body.set(cx, eyeY - 1, cz, pal.blush);
-    const open = new Vox();
-    open.set(0, 0, 0, pal.eye); open.set(1, 0, 0, pal.eye); open.set(1, 1, 0, pal.eye); open.set(0, 1, 0, pal.shine);
-    const shut = new Vox();
-    shut.set(0, 0, 0, pal.eye); shut.set(1, 0, 0, pal.eye);
-    const g = new THREE.Group();
-    const eyeOpts = { ink: false, shadow: false, layer: LAYER.face };
-    const mo = voxMesh(open, eyeOpts), ms = voxMesh(shut, eyeOpts);
-    ms.visible = false;
-    g.add(mo, ms);
+    const g = new THREE.Group(), m = {};
+    for (const ex2 of EXPRESSIONS) {
+      if (!E[ex2]) continue;
+      let rows = E[ex2];
+      if (side < 0 && E.mirrored.includes(ex2)) rows = rows.map(r => [...r].reverse().join(''));
+      m[ex2] = voxMesh(flat(rows, eyeMap), { ink: false, layer: LAYER.face });
+      m[ex2].visible = ex2 === 'open';
+      g.add(m[ex2]);
+    }
     g.position.set(ex, eyeY, fz + 0.75);
     g.scale.z = 0.5;
     bodyGroup.add(g);
-    parts.eyes.push({ open: mo, shut: ms });
+    parts.eyes.push({ g, m });
   }
-  // a tiny mouth between the eyes (two voxels wide on even widths so it stays centred)
-  for (const i of new Set([Math.floor((S.w - 1) / 2), Math.ceil((S.w - 1) / 2)])) {
-    const mz = body.frontAt(col(i), eyeY - 1);
-    if (mz !== null) body.set(col(i), eyeY - 1, mz, pal.dark);
+  const M = MOUTHS[recipe.mouth] ?? MOUTHS.dot;
+  const cL = Math.floor((S.w - 1) / 2), cR = Math.ceil((S.w - 1) / 2);
+  for (const [color, list] of [[pal.dark, M.k], [pal.shine, M.w ?? []]]) {
+    for (const [dx, dy] of list) {
+      for (const i of new Set(dx < 0 ? [cL + dx] : dx > 0 ? [cR + dx] : [cL, cR])) {
+        const mz = body.frontAt(col(i), eyeY - 1 + dy);
+        if (mz !== null) body.set(col(i), eyeY - 1 + dy, mz, color);
+      }
+    }
   }
   bodyGroup.add(voxMesh(body));
 
   // ears, on the top surface, pivoting at their base
-  const E = Math.max(1, Math.round(S.w * 0.2));
-  for (const [i, ex] of [col(E), col(mirror(E))].entries()) {
-    const top = body.topAt(ex, 0) ?? S.h - 1;
-    const ear = new Vox();
-    const len = S.earLen;
-    for (let y = 0; y < len; y++) {
-      ear.set(0, y, 0, y === len - 1 && S.ear === 'point' ? pal.accent : pal.body);
-      if (S.ear === 'point' && y < len - 1) ear.set(i ? -1 : 1, y, 0, pal.body);
+  if (recipe.ears && EARS[recipe.ears.type]) {
+    const part = EARS[recipe.ears.type](recipe.ears, pal);
+    const ei = Math.max(1, Math.round(S.w * 0.2));
+    for (const [side, i] of [[-1, ei], [1, mirror(ei)]]) {
+      const top = body.topAt(col(i), 0) ?? S.h - 1;
+      const vox = side > 0 ? part.vox : mirrorVox(part.vox);
+      const g = attach(vox, [col(i) + 0.5, top + 0.6, 0.5], [side * 0.5, 0, 0.5]);
+      parts.ears.push({ g, side, motion: part.motion, a: 0, v: 0 });
     }
-    const g = new THREE.Group();
-    g.position.set(ex + 0.5, top + 0.6, 0.5);
-    const m = voxMesh(ear, { layer: LAYER.part });
-    m.position.set(-0.5, 0, -0.5);
-    g.add(m);
-    bodyGroup.add(g);
-    parts.ears.push({ g, side: i ? 1 : -1, a: 0, v: 0 });
   }
 
-  // tail, curling up from the back
-  if (S.tail) {
-    const tail = new Vox();
-    for (let i = 0; i < S.tail; i++) tail.set(0, Math.round(i * 0.7), -i, i === S.tail - 1 ? pal.accent : pal.body);
+  // tail, from the back of the body
+  if (recipe.tail && TAILS[recipe.tail.type]) {
+    const part = TAILS[recipe.tail.type](recipe.tail, pal);
     const ty = Math.round(S.h * 0.3), bz = body.backAt(0, ty) ?? -S.d / 2;
-    const g = new THREE.Group();
-    g.position.set(0.5, ty + 0.5, bz + 0.6);
-    const m = voxMesh(tail, { layer: LAYER.part });
-    m.position.set(-0.5, -0.5, -0.5);
-    g.add(m);
-    bodyGroup.add(g);
-    parts.tail = { g, a: 0, v: 0 };
-  }
-
-  // feet
-  if (S.foot) {
-    const feet = new Vox();
-    const fw = S.w >= 9 ? 2 : 1;
-    const F = Math.max(0, Math.round(S.w * 0.18));
-    const footCol = pal.pattern === 'socks' ? pal.accent : pal.dark;
-    for (const i of [F, mirror(F) - fw + 1]) {
-      for (let x = 0; x < fw; x++) for (let z = 0; z < 2; z++) feet.set(col(i + x), 0, z, footCol);
-    }
-    const m = voxMesh(feet, { layer: LAYER.part });
-    m.position.set(S.w % 2 ? -0.5 : 0, 0, S.d % 2 ? -0.5 : 0);
-    squash.add(m);
+    const g = attach(part.vox, [0.5, ty + 0.5, bz + 0.6], [0.5, 0.5, 0.5]);
+    parts.tail = { g, motion: part.motion, a: 0, v: 0 };
   }
   return parts;
 }
@@ -404,27 +507,41 @@ if (!CFG.quality) {
     if (/swiftshader|llvmpipe|software|basic render/i.test(name)) lowQuality = true;
   } catch (e) {}
 }
-renderer.shadowMap.enabled = !lowQuality;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
 const scene = new THREE.Scene();
 const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 1000);
 const camUp = new THREE.Vector3(0, Math.cos(PITCH), -Math.sin(PITCH));
 const camBack = new THREE.Vector3(0, Math.sin(PITCH), Math.cos(PITCH));
 
-scene.add(new THREE.HemisphereLight(0xfff4e8, 0x8a7aa8, 1.6));
-const sun = new THREE.DirectionalLight(0xffffff, 1.9);
-sun.castShadow = !lowQuality;
-sun.shadow.camera.up.set(0, 0, -1);
-sun.shadow.mapSize.set(4096, 1024);
-sun.shadow.bias = -0.0005;
-sun.shadow.normalBias = 0.03;
-scene.add(sun, sun.target);
+// Light from the upper left and in front, so fronts are lit, tops are brightest and sides fall off.
+scene.add(new THREE.HemisphereLight(0xfff4e8, 0x8a7aa8, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+sun.position.set(-0.45, 0.8, 0.9);
+scene.add(sun);
 
-const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.ShadowMaterial({ opacity: 0.22 }));
-floorMesh.rotation.x = -Math.PI / 2;
-floorMesh.receiveShadow = true;
-scene.add(floorMesh);
+// 2D-style blob shadows: a flat dark ellipse facing the camera, centred on the floor line under
+// each object. The object hides the top half, so only a soft smudge shows under its feet.
+const SHADOW_TEX = (() => {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 32;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 16, 0, 32, 16, 32);
+  gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(0.55, 'rgba(0,0,0,.75)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.setTransform(1, 0, 0, 0.5, 0, 8); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+function blobShadow() {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ map: SHADOW_TEX, transparent: true, opacity: 0.32, depthWrite: false }));
+  m.renderOrder = -1;
+  scene.add(m);
+  return m;
+}
+// width w, for an object whose bottom is `height` voxels off the floor
+function placeShadow(m, x, w, height) {
+  const k = clamp(1 - height / 40, 0.25, 1);
+  m.position.set(x, 0, 0);
+  m.scale.set(w * 1.25 * k, 2.2 * k, 1);
+  m.material.opacity = 0.32 * k;
+}
 
 // ---------------- physics world ----------------
 await RAPIER.init();
@@ -439,9 +556,9 @@ function layout() {
   renderer.setSize(W, H);
   const hw = W / 2 / PX, hh = H / 2 / PX;
   cam.left = -hw; cam.right = hw; cam.top = hh; cam.bottom = -hh;
-  // put the front edge of the floor strip at the ground line
-  const front = new THREE.Vector3(0, 0, DEPTH);
-  const shift = front.dot(camUp) - (-hh + CFG.ground / PX);
+  // put the floor (y = 0 on the z = 0 plane everything lives in) a hair above the ground line, so the
+  // blob shadows have room to show
+  const shift = 0 - (-hh + CFG.ground / PX + 0.6);
   cam.position.copy(camBack).multiplyScalar(300).addScaledVector(camUp, shift);
   cam.lookAt(cam.position.clone().sub(camBack));
   cam.updateProjectionMatrix();
@@ -450,25 +567,14 @@ function layout() {
   B.right = -hw + CFG.xmax / 100 * W / PX;
   const cx = (B.left + B.right) / 2, span = B.right - B.left;
 
-  floorMesh.position.set(cx, 0, 0);
-  floorMesh.scale.set(span + 20, DEPTH * 2 + 20, 1);
-
-  sun.position.set(cx - 25, 80, 45);
-  sun.target.position.set(cx, 0, 0);
-  const sc = sun.shadow.camera;
-  sc.left = -span / 2 - 30; sc.right = span / 2 + 30; sc.top = 40; sc.bottom = -40;
-  sc.near = 1; sc.far = 250;
-  sc.updateProjectionMatrix();
-
+  // bodies can't leave z = 0, so only a floor and two side walls are needed
   for (const c of walls) world.removeCollider(c, false);
-  const wall = (x, y, z, hx, hy, hz) => world.createCollider(
-    RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setFriction(0.8), ground);
+  const wall = (x, y, hx, hy) => world.createCollider(
+    RAPIER.ColliderDesc.cuboid(hx, hy, 20).setTranslation(x, y, 0).setFriction(0.8), ground);
   walls = [
-    wall(cx, -5, 0, span / 2 + 50, 5, DEPTH + 50),           // floor
-    wall(B.left - 5, 60, 0, 5, 80, DEPTH + 10),              // left
-    wall(B.right + 5, 60, 0, 5, 80, DEPTH + 10),             // right
-    wall(cx, 60, -DEPTH - 5, span / 2 + 10, 80, 5),           // back
-    wall(cx, 60, DEPTH + 5, span / 2 + 10, 80, 5),            // front
+    wall(cx, -5, span / 2 + 50, 5),       // floor
+    wall(B.left - 5, 60, 5, 80),          // left
+    wall(B.right + 5, 60, 5, 80),         // right
   ];
 }
 layout();
@@ -476,42 +582,50 @@ addEventListener('resize', layout);
 
 // ---------------- the pet ----------------
 const pal = makePalette(CFG.seed);
-const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3();
-const UP = new THREE.Vector3(0, 1, 0);
+const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3();
+// bodies only rotate about z (in the screen plane), so this is the whole rotation
+const rollOf = (q) => wrapAngle(2 * Math.atan2(q.z, q.w));
 
 class Pet {
-  constructor(stage, x = 0) { this.build(stage, x, 30); }
+  constructor(recipe, label, x = 0) { this.build(recipe, label, x, 30); }
 
-  build(stage, x, y) {
+  build(recipe, label, x, y) {
     if (this.vis) scene.remove(this.vis.root);
     if (this.body) world.removeRigidBody(this.body);
-    this.stage = stage;
-    this.vis = buildCritter(stage, pal);
+    this.recipe = recipe; this.stage = label;
+    this.vis = buildCritter(recipe, pal);
     scene.add(this.vis.root);
+    this.shadow ??= blobShadow();
     const S = this.S = this.vis.S;
     this.hx = S.w / 2; this.hy = (S.h + S.foot) / 2; this.hz = S.d / 2;
     const r = Math.min(this.hx, this.hy, this.hz) * 0.45;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(x, y, 0).setAngularDamping(1.5).setCcdEnabled(true));
+      .setTranslation(x, y, 0).enabledTranslations(true, true, false).enabledRotations(false, false, true)
+      .setAngularDamping(1.5).setCcdEnabled(true));
     world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
       .setDensity(1).setFriction(0.9).setRestitution(0.05), this.body);
-    const m = this.body.mass();
-    this.inertia = m * (S.w * S.w + S.h * S.h) / 12;
-    this.state = 'idle'; this.timer = rand(0.5, 1.5);
-    this.target = null; this.yaw = 0;
+    this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
+    this.state = 'idle'; this.timer = rand(0.5, 1.5); this.target = null;
+    this.facing = 0;            // -1 left, 0 toward the camera, 1 right
+    this.yaw = 0; this.yawV = 0; this.glance = 0;
     this.grounded = false; this.dazed = 0; this.crouch = 0;
     this.sq = 0; this.sqV = 0; this.lastVy = 0;
-    this.blink = rand(2, 5);
+    this.blink = rand(2, 5); this.expr = 'open'; this.shownExpr = null;
   }
 
   pos() { return this.body.translation(); }
 
   isGrounded() {
-    const p = this.pos();
-    tmpQ.copy(this.body.rotation());
-    const hit = world.castRay(new RAPIER.Ray(p, { x: 0, y: -1, z: 0 }), this.hy + 0.35, true,
+    const hit = world.castRay(new RAPIER.Ray(this.pos(), { x: 0, y: -1, z: 0 }), this.hy + 0.35, true,
       undefined, undefined, undefined, this.body);
     return !!hit;
+  }
+
+  // Turning is a quick sprite-like flip between three poses, not a physical rotation.
+  face(f) {
+    if (f === this.facing) return;
+    this.facing = f;
+    this.sqV += 1.2; // little hop of the body as it turns
   }
 
   // physics-rate brain + controller
@@ -522,31 +636,19 @@ class Pet {
     if (this.grounded && !wasGrounded) this.sqV -= clamp(-this.lastVy * 0.045, 0, 2.2); // landing squish
     this.lastVy = v.y;
 
-    tmpQ.copy(b.rotation());
-    const up = tmpV.set(0, 1, 0).applyQuaternion(tmpQ);
-    const tilt = Math.acos(clamp(up.y, -1, 1));
-
+    const roll = rollOf(tmpQ.copy(b.rotation()));
     // a hard enough tip-over leaves it dazed on its side for a moment
-    if (tilt > 1.0 && this.dazed <= 0 && !S.egg) this.dazed = 1.4;
+    if (Math.abs(roll) > 1.0 && this.dazed <= 0 && !S.egg) this.dazed = 1.4;
     if (this.dazed > 0) {
       this.dazed -= dt;
       if (this.dazed <= 0 && this.grounded) b.applyImpulse({ x: 0, y: b.mass() * 18, z: 0 }, true); // scramble up
     }
 
-    // keep upright and turn toward the wanted yaw
+    // stay upright
     b.resetTorques(false);
     if (this.dazed <= 0) {
-      const w = b.angvel();
-      const kp = S.upright ?? 60, kd = 2 * Math.sqrt(kp) * 0.75;
-      const axis = tmpV2.copy(up).cross(UP); // |axis| = sin(tilt)
-      const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(tmpQ);
-      const yawErr = wrapAngle(this.yaw - Math.atan2(fwd.x, fwd.z));
-      const I = this.inertia;
-      b.addTorque({
-        x: I * (kp * axis.x - kd * w.x),
-        y: I * (40 * yawErr - 12 * w.y),
-        z: I * (kp * axis.z - kd * w.z),
-      }, true);
+      const kp = S.upright, kd = 2 * Math.sqrt(kp) * 0.75;
+      b.addTorque({ x: 0, y: 0, z: this.inertia * (-kp * roll - kd * b.angvel().z) }, true);
     }
 
     if (S.egg) return this.eggStep(dt);
@@ -554,32 +656,37 @@ class Pet {
     // brain (placeholder until the needs/utility AI: wander and play)
     this.timer -= dt;
     if (this.state === 'idle') {
-      this.yaw += (0 - this.yaw) * Math.min(1, dt * 2);
+      // face the camera, with the odd glance to one side
+      this.glance -= dt;
+      if (this.glance <= 0) {
+        this.face(this.facing === 0 && Math.random() < 0.35 ? (Math.random() < 0.5 ? -1 : 1) : 0);
+        this.glance = this.facing ? rand(0.6, 1.4) : rand(1.5, 4);
+      }
       if (this.timer <= 0) {
+        const m = this.hx + 2;
         const ball = props.find(pr => pr.kind === 'ball');
         if (ball && Math.random() < 0.45) {
-          const bp = ball.body.translation();
-          this.target = { x: bp.x + Math.sign(bp.x - p.x) * 2, z: bp.z };
+          const bx = ball.body.translation().x;
+          this.target = { x: bx + Math.sign(bx - p.x) * 2 };
+        } else if (Math.random() < 0.6) {
+          this.target = { x: clamp(p.x + rand(-30, 30), B.left + m, B.right - m) };
         } else {
-          const m = this.hx + 2;
-          this.target = { x: rand(B.left + m, B.right - m), z: rand(-DEPTH + this.hz + 1, DEPTH - this.hz - 1) };
-          if (Math.random() < 0.6) this.target.x = clamp(p.x + rand(-30, 30), B.left + m, B.right - m);
+          this.target = { x: rand(B.left + m, B.right - m) };
         }
         this.state = 'move';
       }
     } else if (this.state === 'move') {
-      const dx = this.target.x - p.x, dz = this.target.z - p.z, dist = Math.hypot(dx, dz);
-      // face where it's going, but never turn its back to the camera
-      if (dist > 0.5) this.yaw = Math.abs(dx) < 0.5 ? 0 : clamp(Math.atan2(dx, Math.max(dz, 0)), -1.3, 1.3);
-      if (dist < 2) { this.state = 'idle'; this.timer = rand(1, 4); }
-      else if (this.grounded && this.dazed <= 0 && tilt < 0.4) {
+      const dx = this.target.x - p.x, dist = Math.abs(dx);
+      if (dist > 0.5) this.face(Math.sign(dx));
+      if (dist < 2) { this.state = 'idle'; this.timer = rand(1, 4); this.glance = rand(0.3, 1); }
+      else if (this.grounded && this.dazed <= 0 && Math.abs(roll) < 0.4) {
         this.crouch += dt;
         if (this.crouch > 0.14) {
           this.crouch = 0;
           const air = 2 * S.hopV / GRAVITY;
           const hs = Math.min(S.hopS, dist / air);
           const m = b.mass();
-          b.applyImpulse({ x: m * (dx / dist * hs - v.x), y: m * (S.hopV - v.y), z: m * (dz / dist * hs - v.z) }, true);
+          b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (S.hopV - v.y), z: 0 }, true);
           this.sqV += 3;
         }
       }
@@ -596,41 +703,52 @@ class Pet {
 
   // render-rate visuals
   update(dt) {
-    const b = this.body, p = this.pos(), v = b.linvel();
-    const R = this.vis.root;
+    const b = this.body, p = this.pos(), v = b.linvel(), V = this.vis;
     tmpQ.copy(b.rotation());
-    R.quaternion.copy(tmpQ);
+    V.root.quaternion.copy(tmpQ);
     // body origin is the collider centre; the visual origin is the feet
-    R.position.set(p.x, p.y, p.z).add(tmpV.set(0, -this.hy, 0).applyQuaternion(tmpQ));
+    V.root.position.set(p.x, p.y, p.z).add(tmpV.set(0, -this.hy, 0).applyQuaternion(tmpQ));
+    placeShadow(this.shadow, p.x, this.S.w, Math.max(0, p.y - this.hy));
 
-    // squash & stretch spring
+    const ay = clamp((v.y - (this.prevVy ?? v.y)) / Math.max(dt, 1e-3), -900, 900);
+    const ax = clamp((v.x - (this.prevVx ?? v.x)) / Math.max(dt, 1e-3), -900, 900);
+    this.prevVy = v.y; this.prevVx = v.x;
     let target = this.grounded ? 0 : clamp(v.y * 0.004, -0.08, 0.12);
     if (this.crouch > 0) target = -0.22;
-    this.sqV += ((target - this.sq) * 260 - this.sqV * 14) * dt;
-    this.sq = clamp(this.sq + this.sqV * dt, -0.4, 0.35);
-    const sy = 1 + this.sq, sxz = 1 / Math.sqrt(sy);
-    this.vis.squash.scale.set(sxz, sy, sxz);
 
-    // ears and tail lag behind vertical motion
-    const ay = (v.y - (this.prevVy ?? v.y)) / Math.max(dt, 1e-3);
-    this.prevVy = v.y;
-    for (const e of this.vis.ears) {
-      e.v += (-e.a * 180 - e.v * 10 + clamp(ay, -900, 900) * 0.004 * -e.side) * dt;
-      e.a = clamp(e.a + e.v * dt, -0.9, 0.9);
-      e.g.rotation.z = e.a;
+    // The springs are stiff, so integrate them in small steps; one long frame would make them explode.
+    for (let n = Math.ceil(dt / (1 / 120)), h = dt / n; n > 0; n--) {
+      // turning: a snappy, slightly overshooting spring toward the facing pose
+      this.yawV += ((this.facing * FACE_YAW - this.yaw) * 500 - this.yawV * 34) * h;
+      this.yaw = clamp(this.yaw + this.yawV * h, -1, 1);
+      // squash & stretch
+      this.sqV += ((target - this.sq) * 260 - this.sqV * 14) * h;
+      this.sq = clamp(this.sq + this.sqV * h, -0.4, 0.35);
+      // ears and tail lag behind the body, all in the screen plane
+      for (const e of V.ears) {
+        e.v += (-e.a * 180 - e.v * 10 + ay * 0.004 * -e.side + ax * 0.003) * h;
+        e.a = clamp(e.a + e.v * h, -0.9, 0.9);
+      }
+      if (V.tail) {
+        const t = V.tail;
+        t.v += (-t.a * 120 - t.v * 6 + ay * 0.003) * h;
+        t.a = clamp(t.a + t.v * h, -1, 1);
+      }
     }
-    const t = this.vis.tail;
-    if (t) {
-      t.v += (-t.a * 120 - t.v * 6 + clamp(ay, -900, 900) * 0.003 + Math.sin(performance.now() / 300) * 4) * dt;
-      t.a = clamp(t.a + t.v * dt, -1, 1);
-      t.g.rotation.x = t.a;
+    V.squash.rotation.y = this.yaw;
+    const sy = 1 + this.sq, sxz = 1 / Math.sqrt(sy);
+    V.squash.scale.set(sxz, sy, sxz);
+    for (const e of V.ears) e.g.rotation.z = e.a;
+    if (V.tail) {
+      V.tail.g.rotation.x = V.tail.a;
+      V.tail.g.rotation.y = Math.sin(performance.now() / 260) * 0.35; // wag
     }
 
     // blink
     this.blink -= dt;
-    const closed = this.dazed > 0 || this.blink < 0;
     if (this.blink < -0.12) this.blink = rand(2, 5.5);
-    for (const e of this.vis.eyes) { e.open.visible = !closed; e.shut.visible = closed; }
+    const show = this.dazed > 0 || this.blink < 0 ? 'shut' : this.expr;
+    if (show !== this.shownExpr) { V.setExpr(show); this.shownExpr = show; }
   }
 }
 
@@ -649,14 +767,15 @@ function dropBall(x) {
   g.add(mesh);
   scene.add(g);
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
-    .setTranslation(x ?? rand(B.left + 10, B.right - 10), 70, rand(-3, 3)).setCcdEnabled(true)
+    .setTranslation(x ?? rand(B.left + 10, B.right - 10), 70, 0).setCcdEnabled(true)
+    .enabledTranslations(true, true, false).enabledRotations(false, false, true)
     .setLinearDamping(0.15).setAngularDamping(0.4));
   world.createCollider(RAPIER.ColliderDesc.ball(r).setDensity(0.12).setRestitution(0.65).setFriction(0.6), body);
-  props.push({ kind: 'ball', body, g });
+  props.push({ kind: 'ball', body, g, w: r * 2, r, shadow: blobShadow() });
 }
 
 // ---------------- loop ----------------
-const pet = new Pet(CFG.stage, (B.left + B.right) / 2);
+const pet = new Pet(STAGES[CFG.stage], CFG.stage, (B.left + B.right) / 2);
 if (CFG.ball) dropBall();
 
 let debugLines = null;
@@ -709,6 +828,7 @@ function frame(now) {
     const p = pr.body.translation();
     pr.g.position.set(p.x, p.y, p.z);
     pr.g.quaternion.copy(pr.body.rotation());
+    placeShadow(pr.shadow, p.x, pr.w, Math.max(0, p.y - pr.r));
   }
   if (debugLines) {
     const { vertices, colors } = world.debugRender();
@@ -726,14 +846,15 @@ requestAnimationFrame(frame);
 
 // ---------------- testing API ----------------
 window.pet = {
-  hop() { pet.state = 'move'; const p = pet.pos(); pet.target = { x: clamp(p.x + rand(-20, 20), B.left + 6, B.right - 6), z: 0 }; },
+  hop() { pet.state = 'move'; const p = pet.pos(); pet.target = { x: clamp(p.x + rand(-20, 20), B.left + 6, B.right - 6) }; },
   knock(power = 1) {
     const b = pet.body, m = b.mass(), s = Math.random() < 0.5 ? -1 : 1;
     b.applyImpulse({ x: m * 25 * s * power, y: m * 30 * power, z: 0 }, true);
     b.applyTorqueImpulse({ x: 0, y: 0, z: -s * pet.inertia * 9 * power }, true);
   },
   drop(kind = 'ball') { if (kind === 'ball') dropBall(); },
-  stage(s) { if (STAGES[s]) { const p = pet.pos(); pet.build(s, p.x, p.y + 6); } },
+  stage(s) { if (STAGES[s]) { const p = pet.pos(); pet.build(STAGES[s], s, p.x, p.y + 6); } },
+  expr(e) { pet.expr = e; },
 };
 </script>
 </body>

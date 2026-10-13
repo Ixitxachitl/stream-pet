@@ -22,11 +22,11 @@ surprise.
 | Rendering | **three.js** (ES module, pinned version from jsDelivr via `<script type="importmap">`) | WebGL2 with a transparent canvas, shadows and instancing. Works in OBS's CEF. |
 | Physics   | **Rapier** (`@dimforge/rapier3d-compat`, WASM inlined in JS, pinned) | Fast and stable, with joints, sleeping bodies and a character controller. No separate .wasm fetch. `cannon-es` is the fallback if WASM is a problem. |
 | Voxels    | Models defined in code (palette + layer strings), greedy-meshed at load | No asset pipeline. Easy to recolour per pet. An optional MagicaVoxel `.vox` loader can come later. |
-| Camera    | Orthographic, ~30° isometric tilt | Keeps the voxels crisp and keeps the pet the same size anywhere on screen. |
-| Ground    | Invisible plane with a `ShadowMaterial` | The pet casts a real shadow onto your scene while the background stays transparent. |
+| Camera    | Orthographic, nearly front-on (6° tilt) | **Almost 2D**: it reads like a sprite, but the voxels keep real depth and lighting. Same size anywhere on screen. |
+| Shadows   | 2D-style blob shadow under each object | Readable from the front, and much cheaper than shadow maps. |
 | Loop      | Fixed 60 Hz physics step with an accumulator, render on rAF, dt clamped | Keeps it stable when OBS throttles the source. |
 
-Render at pixelRatio 1 and cap the frame rate, with a "low" quality option that turns off shadows and AO.
+Render at pixelRatio 1 and cap the frame rate, with a "low" quality option that drops the ink outlines.
 Pause on `visibilitychange` / `obsSourceVisibleChanged`, as in `cat-rave/index.html`. On wake, don't
 replay the hidden time as physics. Hand it to the life simulation as "time passed" (see §5).
 
@@ -38,8 +38,9 @@ on top of whatever scene is below it.
 
 - **Ground height**: `ground` (px from the bottom, default 0) raises the floor, for example to sit on
   top of a chat box or a lower third.
-- **Depth**: the floor is a shallow strip (a few voxel units deep), so the pet and props can pass in
-  front of and behind each other without wandering "into" the screen.
+- **2D plane**: everything lives on the z = 0 plane. Physics bodies can only move left/right and up/down,
+  and only tip over within the screen. Turning is a quick sprite-like flip to a slight 3/4 pose
+  (about 24°), not a physical rotation.
 - **Edges**: `xmin`/`xmax` (% of width, default 0/100) can pull the walls in to stay clear of a webcam
   or alerts. They are optional.
 - **Fixed spots**: the bed, food dispenser and toy box are small voxel props on the floor. The pet
@@ -48,6 +49,9 @@ on top of whatever scene is below it.
 
 Recommended source size is the full canvas (1920×1080). Everything above the floor stays transparent
 apart from falling props and thought bubbles.
+
+Motion is designed to read as 2D: ears swing in the screen plane, tails wag sideways and peek out when
+it turns, and squash & stretch does most of the acting.
 
 ## 3. Voxel pipeline
 
@@ -75,8 +79,9 @@ apart from falling props and thought bubbles.
 
 ## 4. Physics
 
-- **World**: gravity, ground and wall colliders, and collision groups (pet / props / debris).
-- **Pet body**: one dynamic rigid body (rounded cuboid) for the torso. A PD torque toward upright keeps it
+- **World**: gravity, a floor and two side walls. All bodies are locked to the screen plane (no z
+  movement, rotation only about z), so it plays like a 2D physics game.
+- **Pet body**: one dynamic rigid body (rounded cuboid) for the torso. A PD torque toward upright (about z only) keeps it
   standing, but a strong enough hit (raid confetti, a falling item) can still knock it over. It then
   wobbles back up, which is half the charm. Movement is **hops**: impulses timed to a squash-and-stretch
   animation, not a sliding walk.
