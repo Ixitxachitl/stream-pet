@@ -1686,13 +1686,29 @@ const FOODS = {
     return v;
   } },
 };
-// The dispenser drops food in from the top of the screen.
+// The dispenser drops food in from the top of the screen, but never more than a few at once (medicine
+// always gets through). Returns null if there's already plenty about.
+const FOOD_MAX = 3;
 function dropFood(kind = ['apple', 'fish', 'cookie'][Math.floor(Math.random() * 3)], x) {
+  if (kind !== 'pill' && props.filter(pr => pr.kind === 'food' && pr.food !== 'pill').length >= FOOD_MAX) return null;
   const F = FOODS[kind];
   const p = new Prop('food', F.make(), { x: x ?? rand(B.left + 10, B.right - 10), y: screenTop() + 6, density: 0.25, restitution: 0.35 });
   p.food = kind; p.bitesLeft = F.bites; p.bitesTotal = F.bites;
   p.body.setAngvel({ x: 0, y: 0, z: rand(-4, 4) }, true);
   return p;
+}
+// Food nobody eats goes off: untouched for 40 s on screen (or a half-eaten leftover for 90 s), it
+// vanishes in a little puff. Whatever the pet is busy eating is left alone.
+function spoilFood(dt) {
+  for (const f of [...props]) {
+    if (f.kind !== 'food' || pet.action?.food === f) continue;
+    f.age = (f.age ?? 0) + dt;
+    if (f.age < (f.bitesLeft < f.bitesTotal ? 90 : 40)) continue;
+    const q = f.pos();
+    spawnBits(q.x, q.y, SPARKLE, 10, { vy: 8, spread: 8, size: 0.4, life: 1, grav: 0 });
+    sfx('poof');
+    f.remove();
+  }
 }
 // Take a bite from the side facing `fromX`. Returns false once there's nothing left.
 function biteFood(food, fromX) {
@@ -2282,18 +2298,25 @@ function petCommand(arg, name) {
   if (!pet.asleep) pet.mood('happy', 1.5);
 }
 
+// Timers keep running while the page isn't drawing (a hidden OBS source, a background tab, a preview
+// scrolled out of view), so stream events only make things appear while the pet is actually on screen.
+// They still count either way.
+let lastFrameAt = 0;
+const onScreen = () => !document.hidden && (lastFrameAt === 0 || performance.now() - lastFrameAt < 1000);
+
 function onSub({ name, count = 1 }) {
   if (counts()) { save.events.subs += count; save.traits.generous += 0.3 * count; }
   N.social = clamp(N.social + 10, 0, 100);
-  if (save.stage === 'egg') return;
+  if (save.stage === 'egg' || !onScreen()) return;
   // a treat rains down
-  for (let i = 0; i < Math.min(count, 5); i++) setTimeout(() => dropFood('cake', spotNear(pet.pos().x, rand(-20, 20))), i * 400);
+  for (let i = 0; i < Math.min(count, 3); i++) setTimeout(() => { if (onScreen()) dropFood('cake', spotNear(pet.pos().x, rand(-20, 20))); }, i * 400);
   showBubble('🎉');
 }
 
 function onBits({ name, amount = 100 }) {
   if (counts()) { save.events.bits += amount; save.traits.generous += amount / 500; }
   N.fun = clamp(N.fun + Math.min(30, amount / 50), 0, 100);
+  if (!onScreen()) return;
   // coins rain from the top of the screen
   const n = clamp(Math.round(Math.log10(Math.max(10, amount)) * 4), 3, 14);
   sfx('coin');
@@ -2311,6 +2334,7 @@ function onRaid({ name, viewers = 1 }) {
   }
   N.social = clamp(N.social + 25, 0, 100);
   life.hype = 0.8;
+  if (!onScreen()) return;
   if (name) showBanner(`${name} is raiding! 🎊`);
   // confetti everywhere, scaled by raid size
   const n = clamp(Math.round(20 + Math.sqrt(viewers) * 6), 20, 160), colors = [0xff4d6d, 0x3ab0ff, 0xffd23f, 0x5cc04a, 0xb76bff, 0xffffff];
@@ -2488,9 +2512,9 @@ function runDemo() {
     demoing = true;
     onChat({ name: names[Math.floor(Math.random() * names.length)], text: lines[Math.floor(Math.random() * lines.length)], platform: 'demo' });
     const r = Math.random();
-    if (r < 0.03) onSub({ name: 'PixelPaws' });
-    else if (r < 0.06) onBits({ name: 'bean_counter', amount: 100 });
-    else if (r < 0.07) onRaid({ name: 'voxel_vic', viewers: 25 });
+    if (r < 0.01) onSub({ name: 'PixelPaws' });
+    else if (r < 0.025) onBits({ name: 'bean_counter', amount: 100 });
+    else if (r < 0.029) onRaid({ name: 'voxel_vic', viewers: 25 });
     demoing = false;
     setTimeout(say, rand(1500, 6000));
   };
@@ -2678,6 +2702,7 @@ function stepSim(dt) {
   if (cutscene) stepCutscene(dt);
   pet.step(dt);
   stepEffects(dt);
+  spoilFood(dt);
   world.step();
   // anything that escaped the walls comes back in from above
   for (const pr of [pet, ...props]) {
@@ -2710,6 +2735,7 @@ function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  lastFrameAt = now;
   acc += dt;
   let n = 0;
   while (acc >= STEP && n < 6) { stepSim(STEP); acc -= STEP; n++; }
@@ -2733,6 +2759,7 @@ function frame(now) {
       `wants ${Object.entries(pet.scores).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + v.toFixed(2)).join('  ')}\n` +
       `traits ${TRAITS.map(k => k + ' ' + save.traits[k].toFixed(1)).join('  ')}\n` +
       (save.lineage.length ? `family ${save.lineage.map(l => `${l.name} (${l.form ?? '?'})`).join(' → ')}\n` : '') +
+      `props ${Object.entries(props.reduce((o, pr) => (o[pr.food ?? pr.kind] = (o[pr.food ?? pr.kind] ?? 0) + 1, o), {})).map(([k, v]) => k + ' ' + v).join('  ')}\n` +
       `pos ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  walls ${B.left.toFixed(0)}..${B.right.toFixed(0)}`;
   }
   renderer.render(scene, cam);
