@@ -3,11 +3,15 @@
 <head>
 <meta charset="utf-8">
 <title>Stream Pet</title>
+<link href="https://fonts.googleapis.com/css2?family=Bangers&family=Comic+Neue:wght@700&display=swap" rel="stylesheet">
 <!--
   STREAM PET — OBS Browser Source overlay
   A little voxel critter that lives along the bottom of your stream and looks after itself.
   ------------------------------------------------------------
   Add as a Browser Source at your canvas size (e.g. 1920x1080). The background is transparent.
+
+  SETTINGS: in OBS, right-click this source → Interact, move the mouse over the overlay and click the
+  gear in the bottom-right corner. Every setting can also be a URL parameter, which overrides it.
 
   Chat (all read anonymously, all optional; the pet never needs chat):
     channel   Twitch channel          kick      Kick channel
@@ -17,19 +21,22 @@
     ignore    extra bot names to ignore, comma separated
     cmds      1 = chat can use !pet (hearts) and !pet stats
     demo      1 = fake chat for trying it out (never counts toward how it grows up)
-    status    events (default), always or off: the little name and needs card
 
-  Other URL parameters:
+  Pet and where it lives:
+    name      the pet's name (default: a generated one)
     size      adult height on screen in px (default 160)
+    status    events (default), always or off: the little name and needs card
+    night     local hours it wants to sleep, e.g. 1-7 (default), or off
     ground    floor height in px from the bottom (default 0)
     xmin/xmax left/right walls in % of the width (default 0/100)
+    slot      name of the save slot, to run more than one pet (default main)
+
+  Testing only:
     seed      test with a throwaway pet with this look (colours, pattern)
     form      test with a throwaway adult of this form id (see the gallery)
     gallery   1 = show every form on a grid (spoilers!), page=N to flip
     stage     test with a throwaway pet at this stage: egg, baby, child, teen, adult or elder
-    slot      name of the save slot, to run more than one pet (default main)
     reset     1 = start over with a new egg
-    name      the pet's name (default: a generated one)
     agerate   how much faster it grows up (for testing)
     ball      1 = drop a ball in to play with
     drop      things to drop in at the start, for testing: drop=apple,fish,cookie,cake,poop,ball
@@ -37,7 +44,6 @@
     debug     1 = collider wireframes + a status readout
     settle    seconds of simulation to run before the first frame (for screenshots)
     speed     life-clock speed: needs fall this many times faster (for testing)
-    night     local hours it wants to sleep, e.g. 1-7 (default), or off
     set       start needs for testing, e.g. set=hunger:10,energy:5
 
   Custom integrations (Streamer.bot, etc.) can call:
@@ -83,6 +89,59 @@
   .float{position:fixed;pointer-events:none;font:700 22px/1 "Comic Neue","Comic Sans MS",sans-serif;
     animation:floatUp 2.5s ease-out forwards}
   .float.zzz{color:#e8f0ff;text-shadow:0 2px 4px #0006}
+  /* ---------- settings window (only visible while you interact with the source) ---------- */
+  :root{--ink:#111}
+  #gear{position:fixed;right:16px;bottom:16px;width:48px;height:48px;border-radius:50%;z-index:1000;
+    border:3px solid var(--ink);background:#fff27a;box-shadow:4px 4px 0 var(--ink);cursor:pointer;
+    display:grid;place-items:center;opacity:0;pointer-events:none;transition:opacity .25s,transform .15s}
+  body.mouse #gear{opacity:1;pointer-events:auto}
+  #gear:hover{transform:rotate(30deg) scale(1.06)}
+  #gear svg{width:26px;height:26px}
+  #settings{position:fixed;inset:0;z-index:1001;display:none;align-items:center;justify-content:center;
+    background:rgba(12,8,24,.55);pointer-events:auto;font:700 14px/1.3 'Comic Neue',system-ui,sans-serif;color:var(--ink)}
+  #settings.open{display:flex}
+  .sp{width:min(900px,94vw);max-height:92vh;display:flex;flex-direction:column;background:#fff;
+    border:4px solid var(--ink);border-radius:16px;box-shadow:10px 10px 0 #ff2bd6;overflow:hidden}
+  .sp-head{padding:14px 20px 10px;border-bottom:4px solid var(--ink);
+    background:radial-gradient(circle,rgba(0,0,0,.12) 1.2px,transparent 1.7px) 0 0/8px 8px,#fff27a}
+  .sp-head h2{margin:0;font:34px/1 'Bangers',sans-serif;letter-spacing:2px;transform:rotate(-1deg)}
+  .sp-head p{margin:6px 0 0;font-size:13px}
+  .sp-body{overflow:auto;padding:16px 20px;display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+  .sp-sec{border:3px solid var(--ink);border-radius:12px;padding:10px 12px 12px;background:#fafaff;box-shadow:4px 4px 0 var(--ink)}
+  .sp-sec h3{margin:-2px 0 8px;font:21px/1 'Bangers',sans-serif;letter-spacing:1.5px;color:#7a2cff}
+  .sp-f{margin:0 0 10px}
+  .sp-f:last-child{margin-bottom:0}
+  .sp-f label{display:block;margin-bottom:3px}
+  .sp-f input[type=text],.sp-f input[type=password],.sp-f input[type=number],.sp-f textarea,.sp-f select{
+    width:100%;box-sizing:border-box;font:600 14px 'Comic Neue',system-ui,sans-serif;padding:6px 8px;
+    border:2.5px solid var(--ink);border-radius:8px;background:#fff;color:var(--ink)}
+  .sp-f textarea{min-height:58px;resize:vertical;font:12px monospace}
+  .sp-f input:focus,.sp-f textarea:focus,.sp-f select:focus{outline:3px solid #00e5ff;outline-offset:1px}
+  .sp-f input:disabled,.sp-f textarea:disabled,.sp-f select:disabled{background:#eee;color:#666}
+  .sp-f small{display:block;margin-top:3px;font-weight:700;font-size:12px;color:#555}
+  .sp-f small.url{color:#c2185b}
+  .sp-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .sp-row label{margin:0}
+  .sp-row2{display:flex;gap:8px;margin-top:6px}
+  .sw{position:relative;width:46px;height:26px;flex:none}
+  .sw input{opacity:0;width:100%;height:100%;margin:0;position:absolute;cursor:pointer;z-index:1}
+  .sw i{position:absolute;inset:0;border:2.5px solid var(--ink);border-radius:20px;background:#ddd;transition:background .15s}
+  .sw i::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;
+    background:#fff;border:2px solid var(--ink);transition:transform .15s}
+  .sw input:checked + i{background:#39ff88}
+  .sw input:checked + i::after{transform:translateX(19px)}
+  .sw input:disabled + i{opacity:.5}
+  .sp-foot{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 20px;border-top:4px solid var(--ink);background:#f3f0ff}
+  .sp-foot .grow{flex:1}
+  .sp-btn{font:19px/1 'Bangers',sans-serif;letter-spacing:1px;padding:8px 14px 7px;border:3px solid var(--ink);
+    border-radius:10px;background:#fff;box-shadow:3px 3px 0 var(--ink);cursor:pointer;color:var(--ink)}
+  .sp-btn.sm{font-size:16px;padding:6px 10px 5px}
+  .sp-btn:hover{transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--ink)}
+  .sp-btn:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--ink)}
+  .sp-btn.go{background:#39ff88}
+  .sp-btn.warn{background:#ffd0e4}
+  .sp-msg{font-size:13px;color:#7a2cff;min-height:1em}
+  .sp-link{width:100%;font:12px monospace;padding:6px;border:2px solid var(--ink);border-radius:6px;display:none}
   @keyframes floatUp{0%{opacity:0;transform:translate(0,0) scale(.6)}15%{opacity:1}
     100%{opacity:0;transform:translate(26px,-90px) scale(1.4)}}
 </style>
@@ -113,20 +172,57 @@ const num = (k, def, min, max) => {
   const v = parseFloat(Q.get(k));
   return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
 };
+// Settings live in this browser source's local storage (the gear, via OBS Interact), and any of them
+// can also be given as a URL parameter, which wins. The rest of the parameters are for testing only.
+const SETTINGS_KEY = 'streampet.settings.v1';
+let savedSettings = {}, storageOK = true;
+try { savedSettings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') || {}; } catch (e) { storageOK = false; }
+const FIELDS = [
+  { sec: 'Chat (optional)' },
+  { k: 'channel', label: 'Twitch channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
+  { k: 'kick', label: 'Kick channel', type: 'text', def: '', ph: 'yourchannel', help: 'Read anonymously, no login needed.' },
+  { k: 'tiktok', label: 'TikTok bridge', type: 'text', def: '', ph: '1 = TikFinity, or ws://…', help: 'TikTok needs a local bridge app. "1" uses TikFinity on this PC.' },
+  { k: 'youtube', label: 'YouTube live', type: 'text', def: '', ph: 'video ID / link, or ws://…', help: 'A live video ID or link (needs the API key below), or a bridge address.' },
+  { k: 'ytkey', label: 'YouTube API key', type: 'password', def: '', help: 'YouTube Data API v3 key from Google Cloud Console.' },
+  { k: 'ytpoll', label: 'YouTube check every (s)', type: 'num', def: 6, min: 2, max: 60, step: 1, help: 'Lower = snappier, but uses the daily API quota faster.' },
+  { k: 'ignore', label: 'Ignore these names', type: 'text', def: '', ph: 'mybot, otherbot', help: 'Common bots are ignored already.' },
+  { k: 'cmds', label: 'Chat commands', type: 'bool', def: false, help: '!pet sends hearts, !pet stats shows its card.' },
+  { k: 'demo', label: 'Demo chat', type: 'bool', def: false, help: 'Fake chatters, for trying it out. Never counts toward how it grows up.' },
+  { sec: 'Pet' },
+  { k: 'name', label: 'Name', type: 'text', def: '', ph: '(a cute generated one)', help: 'Leave empty to let it have its own.' },
+  { k: 'size', label: 'Grown-up size (px)', type: 'num', def: 160, min: 60, max: 400, step: 5, help: 'How tall an adult is on screen. Babies are smaller.' },
+  { k: 'status', label: 'Status card', type: 'select', def: 'events', opts: [['events', 'On big moments'], ['always', 'Always'], ['off', 'Never']] },
+  { k: 'night', label: 'Bedtime hours', type: 'text', def: '1-7', ph: '1-7', help: 'Local hours it wants to sleep, like 23-7. "off" for never.' },
+  { sec: 'Where it lives' },
+  { k: 'ground', label: 'Floor height (px)', type: 'num', def: 0, min: 0, max: 2000, step: 1, help: 'Raise it to stand on top of something.' },
+  { k: 'xmin', label: 'Left edge (%)', type: 'num', def: 0, min: 0, max: 100, step: 1 },
+  { k: 'xmax', label: 'Right edge (%)', type: 'num', def: 100, min: 0, max: 100, step: 1, help: 'Keep it clear of a webcam or alerts.' },
+  { k: 'slot', label: 'Save slot', type: 'text', def: 'main', help: 'Give two browser sources different slots to run two pets.' },
+];
+const FIELD = Object.fromEntries(FIELDS.filter(f => f.k).map(f => [f.k, f]));
+function coerce(f, v) {
+  if (f.type === 'bool') return v === true || v === 1 || /^(1|true|yes|on)$/i.test(String(v));
+  if (f.type === 'num') { const n = parseFloat(v); return isNaN(n) ? f.def : Math.min(f.max, Math.max(f.min, n)); }
+  if (f.type === 'select') return f.opts.some(o => o[0] === v) ? v : f.def;
+  return String(v ?? '').trim();
+}
+const fromURL = {};
+for (const f of Object.values(FIELD)) if (Q.has(f.k)) fromURL[f.k] = coerce(f, Q.get(f.k));
+const SET = {};
+for (const f of Object.values(FIELD)) SET[f.k] = f.k in fromURL ? fromURL[f.k] : f.k in savedSettings ? coerce(f, savedSettings[f.k]) : f.def;
+
 const CFG = {
-  size: num('size', 160, 60, 400),
-  ground: num('ground', 0, 0, 2000),
-  xmin: num('xmin', 0, 0, 100),
-  xmax: num('xmax', 100, 0, 100),
+  ...SET,
+  name: SET.name.slice(0, 24),
+  channel: SET.channel.replace(/^#/, '').toLowerCase(),
+  kick: SET.kick.replace(/^.*kick\.com\//i, '').replace(/[/?#].*$/, '').toLowerCase(),
+  xmin: Math.min(SET.xmin, SET.xmax), xmax: Math.max(SET.xmin, SET.xmax),
+  slot: SET.slot.replace(/[^\w-]/g, '') || 'main',
+  // testing only
   seed: Q.get('seed') || String(Math.floor(Math.random() * 1e9)),
-  name: (Q.get('name') || '').slice(0, 24),
   ball: Q.get('ball') === '1',
   debug: Q.get('debug') === '1',
   speed: num('speed', 1, 0.1, 3600),
-  channel: Q.get('channel') || '', kick: Q.get('kick') || '', tiktok: Q.get('tiktok') || '',
-  youtube: Q.get('youtube') || '', ytkey: Q.get('ytkey') || '', ytpoll: num('ytpoll', 6, 2, 60),
-  demo: Q.get('demo') === '1', cmds: Q.get('cmds') === '1',
-  status: ['always', 'off'].includes(Q.get('status')) ? Q.get('status') : 'events',
 };
 if (CFG.xmax - CFG.xmin < 10) { CFG.xmin = 0; CFG.xmax = 100; }
 if (CFG.debug) document.body.classList.add('debug');
@@ -162,7 +258,7 @@ const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 // ---------------- save ----------------
 // One pet per slot, kept in this browser source's local storage. ?slot= runs a separate pet, ?reset=1
 // starts over. Test runs (?stage= or ?seed= given) build a throwaway pet and never touch the save.
-const SAVE_KEY = 'streampet.v1.' + (Q.get('slot') || 'main');
+const SAVE_KEY = 'streampet.v1.' + CFG.slot;
 const TESTING = Q.has('stage') || Q.has('seed') || Q.has('form');
 const TRAITS = ['fed', 'rested', 'playful', 'social', 'hyped', 'calm', 'nightowl', 'generous'];
 
@@ -195,8 +291,9 @@ function loadSave() {
   } catch (e) {}
   return newSave(Math.floor(Math.random() * 1e9));
 }
+let importing = false; // set while an import or reset reloads the page, so the old pet isn't saved over it
 function writeSave() {
-  if (TESTING) return;
+  if (TESTING || importing) return;
   save.lastSeen = Date.now();
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {}
 }
@@ -1691,7 +1788,7 @@ function tickLife(dt) {
 
 // Night hours (local time) make it want to sleep. ?night=1-7 by default, ?night=off to never.
 const NIGHT = (() => {
-  const v = Q.get('night') ?? '1-7';
+  const v = CFG.night;
   const m = /^(\d+)-(\d+)$/.exec(v);
   return m ? [+m[1] % 24, +m[2] % 24] : null;
 })();
@@ -2110,7 +2207,7 @@ function placeBanner() {
 // Everything chat does is passive: it fills the social need, shapes traits, and gets reactions. The
 // pet never needs it. Demo chat (?demo=1) is for show only and never counts toward its traits.
 const BOTS = new Set(['nightbot', 'streamelements', 'streamlabs', 'moobot', 'fossabot', 'soundalerts', 'wizebot',
-  'sery_bot', 'kofistreambot', 'botrixoficial', 'commanderroot', ...(Q.get('ignore') || '').toLowerCase().split(',').filter(Boolean)]);
+  'sery_bot', 'kofistreambot', 'botrixoficial', 'commanderroot', ...CFG.ignore.toLowerCase().split(/[\s,]+/).filter(Boolean)]);
 const greets = [];                 // first-time chatters waiting for a wave
 const recentChat = [];             // message times, for spotting hype
 let demoing = false;               // true while demo chat is speaking: it doesn't count
@@ -2470,6 +2567,7 @@ if (save.formId) {
 let pet = new Pet(recipeFor(save.stage), save.stage, (B.left + B.right) / 2);
 placeBed(B.left + 14);
 if (!TESTING) {
+  if (CFG.name && save.stage !== 'egg') save.name = CFG.name;
   catchUp((Date.now() - save.lastSeen) / 1000);
   writeSave();
   setInterval(writeSave, 30000);
@@ -2564,6 +2662,195 @@ function frame(now) {
   renderer.render(scene, cam);
 }
 requestAnimationFrame(frame);
+
+
+// ---------------- settings window ----------------
+// Open it from OBS: right-click the source → Interact, move the mouse, click the gear.
+(function settingsUI() {
+  const gear = document.createElement('button');
+  gear.id = 'gear'; gear.title = 'Stream Pet settings';
+  gear.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm9 3.5-2.2-.8a7 7 0 0 0-.6-1.5l1-2.1-1.8-1.8-2.1 1a7 7 0 0 0-1.5-.6L13 2h-2l-.8 2.2a7 7 0 0 0-1.5.6l-2.1-1-1.8 1.8 1 2.1a7 7 0 0 0-.6 1.5L3 11v2l2.2.8c.1.5.3 1 .6 1.5l-1 2.1 1.8 1.8 2.1-1c.5.3 1 .5 1.5.6L11 22h2l.8-2.2a7 7 0 0 0 1.5-.6l2.1 1 1.8-1.8-1-2.1c.3-.5.5-1 .6-1.5L21 13z" fill="#111"/></svg>';
+  document.body.appendChild(gear);
+
+  const panel = document.createElement('div');
+  panel.id = 'settings';
+  panel.innerHTML = `<div class="sp" role="dialog" aria-label="Stream Pet settings">
+    <div class="sp-head"><h2>Stream Pet — Settings</h2>
+      <p>Saved in this browser source and applied when you press <b>Save &amp; apply</b>. Heads up: this window shows on stream while it's open.</p></div>
+    <div class="sp-body"></div>
+    <div class="sp-foot">
+      <button class="sp-btn" data-act="test">Test chat</button>
+      <button class="sp-btn" data-act="link">Copy setup link</button>
+      <button class="sp-btn warn" data-act="defaults">Defaults</button>
+      <span class="sp-msg grow"></span>
+      <button class="sp-btn" data-act="close">Cancel</button>
+      <button class="sp-btn go" data-act="save">Save &amp; apply</button>
+      <input class="sp-link" readonly>
+    </div></div>`;
+  document.body.appendChild(panel);
+  const body = panel.querySelector('.sp-body'), msg = panel.querySelector('.sp-msg'), linkBox = panel.querySelector('.sp-link');
+  const inputs = {};
+
+  let sec = null;
+  for (const f of FIELDS) {
+    if (f.sec) {
+      sec = document.createElement('div'); sec.className = 'sp-sec';
+      const h = document.createElement('h3'); h.textContent = f.sec; sec.appendChild(h);
+      body.appendChild(sec); continue;
+    }
+    const wrapF = document.createElement('div'); wrapF.className = 'sp-f';
+    const id = 'sp-' + f.k;
+    const lab = document.createElement('label'); lab.htmlFor = id; lab.textContent = f.label;
+    let inp;
+    if (f.type === 'bool') {
+      const row = document.createElement('div'); row.className = 'sp-row';
+      const sw = document.createElement('span'); sw.className = 'sw';
+      inp = document.createElement('input'); inp.type = 'checkbox';
+      sw.append(inp, document.createElement('i'));
+      row.append(lab, sw); wrapF.appendChild(row);
+    } else if (f.type === 'select') {
+      inp = document.createElement('select');
+      for (const [v, t] of f.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; inp.appendChild(o); }
+      wrapF.append(lab, inp);
+    } else {
+      inp = document.createElement('input');
+      inp.type = f.type === 'num' ? 'number' : f.type;
+      if (f.type === 'num') { inp.min = f.min; inp.max = f.max; inp.step = f.step; }
+      if (f.ph) inp.placeholder = f.ph;
+      inp.spellcheck = false; inp.autocomplete = 'off';
+      wrapF.append(lab, inp);
+    }
+    inp.id = id;
+    if (f.help) { const sm = document.createElement('small'); sm.textContent = f.help; wrapF.appendChild(sm); }
+    if (f.k in fromURL) {
+      inp.disabled = true;
+      const sm = document.createElement('small'); sm.className = 'url';
+      sm.textContent = 'Set by the source URL, which overrides this.';
+      wrapF.appendChild(sm);
+    }
+    inputs[f.k] = inp;
+    sec.appendChild(wrapF);
+  }
+
+  // the pet itself: export, import and start over
+  const petSec = document.createElement('div');
+  petSec.className = 'sp-sec';
+  petSec.innerHTML = `<h3>Your pet</h3>
+    <div class="sp-f"><small class="who"></small></div>
+    <div class="sp-f"><label for="sp-io">Back up or move your pet</label>
+      <textarea id="sp-io" spellcheck="false" placeholder="Export puts your pet here as text. To import, paste one here."></textarea>
+      <div class="sp-row2"><button class="sp-btn sm" data-pet="export">Export</button><button class="sp-btn sm" data-pet="import">Import</button></div>
+      <small>Keep a copy somewhere safe: clearing OBS's browser cache would lose it.</small></div>
+    <div class="sp-f"><button class="sp-btn sm warn" data-pet="reset">Start over with a new egg…</button></div>`;
+  body.appendChild(petSec);
+  const io = petSec.querySelector('#sp-io'), who = petSec.querySelector('.who');
+  let resetArmed = false;
+  petSec.addEventListener('click', (e) => {
+    const act = e.target.dataset?.pet;
+    if (!act) return;
+    if (TESTING) { msg.textContent = 'This is a test pet (stage/seed/form in the URL), so there\'s nothing to save.'; return; }
+    if (act === 'export') {
+      writeSave();
+      io.value = JSON.stringify(save);
+      io.select();
+      try { navigator.clipboard.writeText(io.value); msg.textContent = 'Exported and copied.'; } catch (err) { msg.textContent = 'Exported: copy it from the box.'; }
+    }
+    if (act === 'import') {
+      let s;
+      try { s = JSON.parse(io.value); } catch (err) { msg.textContent = 'That doesn\'t look like an exported pet.'; return; }
+      if (!s || s.v !== 1 || !s.needs || !s.traits || !s.stage) { msg.textContent = 'That doesn\'t look like an exported pet.'; return; }
+      try { localStorage.setItem(SAVE_KEY, JSON.stringify({ ...s, lastSeen: Date.now() })); } catch (err) { msg.textContent = 'Couldn\'t save here.'; return; }
+      msg.textContent = `Imported ${s.name ?? 'an egg'}! Reloading…`;
+      importing = true;
+      setTimeout(() => location.reload(), 300);
+    }
+    if (act === 'reset') {
+      if (!resetArmed) {
+        resetArmed = true;
+        e.target.textContent = `Really say goodbye to ${save.name ?? 'this egg'}? Click again`;
+        setTimeout(() => { resetArmed = false; e.target.textContent = 'Start over with a new egg…'; }, 5000);
+        return;
+      }
+      try { localStorage.removeItem(SAVE_KEY); } catch (err) {}
+      importing = true;
+      msg.textContent = 'Starting over…';
+      setTimeout(() => location.reload(), 300);
+    }
+  });
+
+  const fill = (vals) => {
+    for (const [k, inp] of Object.entries(inputs)) {
+      const v = vals[k];
+      if (FIELD[k].type === 'bool') inp.checked = !!v; else inp.value = v;
+    }
+  };
+  const read = () => {
+    const out = {};
+    for (const [k, inp] of Object.entries(inputs)) out[k] = coerce(FIELD[k], FIELD[k].type === 'bool' ? inp.checked : inp.value);
+    return out;
+  };
+  const open = () => {
+    fill(SET);
+    who.textContent = save.stage === 'egg' ? 'An egg, waiting to hatch.' :
+      `${save.name}, generation ${save.gen}, ${Math.round(ageHours())} hours old.`;
+    msg.textContent = storageOK ? '' : 'This browser source can\'t save settings — use "Copy setup link" instead.';
+    linkBox.style.display = 'none';
+    panel.classList.add('open');
+  };
+  const close = () => panel.classList.remove('open');
+
+  gear.addEventListener('click', open);
+  panel.addEventListener('mousedown', e => { if (e.target === panel) close(); });
+  addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+
+  panel.querySelector('.sp-foot').addEventListener('click', e => {
+    const act = e.target.dataset && e.target.dataset.act;
+    if (!act) return;
+    if (act === 'close') close();
+    if (act === 'test') {
+      onChat({ name: 'test_chatter_' + Math.floor(Math.random() * 1000), text: 'hello!' });
+      msg.textContent = 'Sent a test chat message.';
+    }
+    if (act === 'defaults') {
+      const d = {}; for (const f of Object.values(FIELD)) d[f.k] = f.def;
+      fill(d); msg.textContent = 'Defaults filled in — press Save & apply to keep them.';
+    }
+    if (act === 'link') {
+      const vals = read(), q = new URLSearchParams();
+      for (const f of Object.values(FIELD)) {
+        const v = vals[f.k];
+        if (v === f.def) continue;
+        q.set(f.k, f.type === 'bool' ? (v ? '1' : '0') : String(v));
+      }
+      const link = location.href.split(/[?#]/)[0] + (q.toString() ? '?' + q.toString() : '');
+      linkBox.value = link; linkBox.style.display = 'block'; linkBox.select();
+      const done = () => { msg.textContent = 'Setup link copied' + (vals.ytkey ? ' (it includes your YouTube API key — keep it private).' : '.'); };
+      try { navigator.clipboard.writeText(link).then(done, () => { document.execCommand('copy'); done(); }); }
+      catch (err) { try { document.execCommand('copy'); done(); } catch (e2) { msg.textContent = 'Copy the link from the box below.'; } }
+    }
+    if (act === 'save') {
+      try {
+        const vals = read();
+        // fields locked by the URL keep whatever was saved before (the URL value isn't a choice made here)
+        for (const k in fromURL) { if (k in savedSettings) vals[k] = coerce(FIELD[k], savedSettings[k]); else delete vals[k]; }
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(vals));
+        writeSave();
+        msg.textContent = 'Saved! Reloading…';
+        setTimeout(() => location.reload(), 250);
+      } catch (err) {
+        msg.textContent = 'Couldn\'t save here — use "Copy setup link" and paste it as the source URL.';
+      }
+    }
+  });
+
+  // gear only appears while a mouse is over the overlay (i.e. in OBS's Interact window)
+  let mt;
+  addEventListener('mousemove', () => {
+    document.body.classList.add('mouse');
+    clearTimeout(mt); mt = setTimeout(() => document.body.classList.remove('mouse'), 3000);
+  });
+  document.addEventListener('mouseleave', () => document.body.classList.remove('mouse'));
+})();
 
 // ---------------- testing API ----------------
 window.pet = {
