@@ -1379,6 +1379,7 @@ function layout() {
   cam.position.copy(camBack).multiplyScalar(300).addScaledVector(camUp, shift);
   cam.lookAt(cam.position.clone().sub(camBack));
   cam.updateProjectionMatrix();
+  cam.updateMatrixWorld(); // now, not at the first render, so screen positions are right straight away
 
   B.left = -hw + CFG.xmin / 100 * W / PX;
   B.right = -hw + CFG.xmax / 100 * W / PX;
@@ -2677,7 +2678,12 @@ function placeOverlays() {
       [x, y] = toScreen(q.x + pet.hx * 0.4, q.y + pet.hy + 2);
     }
     x = clamp(x, M + 6, innerWidth - w - M + 6);
-    bubbleEl.style.transform = `translate(${x.toFixed(1)}px, ${Math.max(62 + M, y).toFixed(1)}px)`;
+    y = Math.max(62 + M, y);
+    // follow the pet smoothly rather than copying every hop and bounce
+    const k = bubblePos ? 1 - Math.exp(-Math.min(0.1, (now - bubbleAt) / 1000) * 7) : 1;
+    bubblePos = bubblePos ? [bubblePos[0] + (x - bubblePos[0]) * k, bubblePos[1] + (y - bubblePos[1]) * k] : [x, y];
+    bubbleAt = now;
+    bubbleEl.style.transform = `translate(${bubblePos[0].toFixed(1)}px, ${bubblePos[1].toFixed(1)}px)`;
   } else bubbleEl.classList.remove('show');
 }
 
@@ -2766,9 +2772,12 @@ const bubbleEl = document.getElementById('bubble');
 let bubbleUntil = 0;
 function showBubble(icon) {
   bubbleEl.textContent = icon;
-  bubbleEl.classList.remove('show'); void bubbleEl.offsetWidth; bubbleEl.classList.add('show');
   bubbleUntil = performance.now() + 2600;
+  bubblePos = null;   // place it before it shows, so it doesn't flash up where the last one was
+  placeOverlays();
+  bubbleEl.classList.remove('show'); void bubbleEl.offsetWidth; bubbleEl.classList.add('show');
 }
+let bubblePos = null, bubbleAt = 0;
 function floatText(x, y, text, cls) {
   const el = document.createElement('div');
   el.className = 'float ' + (cls || '');
