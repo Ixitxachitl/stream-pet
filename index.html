@@ -26,7 +26,7 @@
     name      the pet's name (default: a generated one)
     size      adult height on screen in px (default 160)
     status    events (default), always or off: the little name and needs card
-    night     local hours it wants to sleep, e.g. 1-7 (default), or off
+    night     local hours it sleeps: 1-7 (default, 1 am to 7 am), 13-19 or 1pm-7pm, 11pm-7am, or off
     sfx       sound effects volume 0-100 (default 0 = off)
     ground    floor height in px from the bottom (default 0)
     xmin/xmax left/right walls in % of the width (default 0/100)
@@ -215,7 +215,7 @@ const FIELDS = [
   { k: 'size', label: 'Grown-up size (px)', type: 'num', def: 160, min: 60, max: 400, step: 5, help: 'How tall an adult is on screen. Babies are smaller.' },
   { k: 'status', label: 'Status card', type: 'select', def: 'events', opts: [['events', 'On big moments'], ['always', 'Always'], ['off', 'Never']] },
   { k: 'sfx', label: 'Sound effects volume', type: 'num', def: 0, min: 0, max: 100, step: 5, help: '0 = off. In OBS, tick "Control audio via OBS" to hear them.' },
-  { k: 'night', label: 'Bedtime hours', type: 'text', def: '1-7', ph: '1-7', help: 'Local hours it wants to sleep, like 23-7. "off" for never.' },
+  { k: 'night', label: 'Bedtime hours', type: 'text', def: '1-7', ph: '1-7', help: 'Your local time. 1-7 is 1 am to 7 am; 1pm-7pm or 13-19 for the afternoon; 11pm-7am overnight. "off" for never.' },
   { sec: 'Where it lives' },
   { k: 'ground', label: 'Floor height (px)', type: 'num', def: 0, min: 0, max: 2000, step: 1, help: 'Raise it to stand on top of something.' },
   { k: 'xmin', label: 'Left edge (%)', type: 'num', def: 0, min: 0, max: 100, step: 1 },
@@ -1881,10 +1881,14 @@ function tickLife(dt) {
 }
 
 // Night hours (local time) make it want to sleep. ?night=1-7 by default, ?night=off to never.
+// Bedtime, in this PC's local time. 24-hour ("1-7" is 1 am to 7 am, "13-19" is 1 pm to 7 pm) or with
+// am/pm ("11pm-7am", "1-7pm"; a lone am/pm applies to both ends). "off" means never.
 const NIGHT = (() => {
-  const v = CFG.night;
-  const m = /^(\d+)-(\d+)$/.exec(v);
-  return m ? [+m[1] % 24, +m[2] % 24] : null;
+  const m = /^(\d{1,2})\s*(am|pm)?\s*(?:-|–|to)\s*(\d{1,2})\s*(am|pm)?$/i.exec(CFG.night.trim());
+  if (!m) return null;
+  const sa = m[2] || m[4], sb = m[4] || m[2];
+  const h = (n, suf) => (suf ? (n % 12) + (/pm/i.test(suf) ? 12 : 0) : n % 24);
+  return [h(+m[1], sa), h(+m[3], sb)];
 })();
 function isNight() {
   if (!NIGHT) return false;
@@ -1973,7 +1977,8 @@ const ACTIONS = {
   },
   sleep: {
     bubble: '💤', minTime: 20,
-    score: () => want(N.energy, 35) * 1.1 + (isNight() && N.energy < 75 ? 0.45 : 0) + (pet.asleep && isNight() ? 0.5 : 0),
+    // at bedtime it goes to bed whatever its energy, and sleeps until bedtime's over
+    score: () => (isNight() ? 1 : want(N.energy, 35) * 1.1),
     start(p, a) { a.z = 0; },
     step(p, dt, a) {
       const bed = findProp('bed', p.pos().x);
