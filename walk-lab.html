@@ -1,0 +1,827 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Stream Pet Walk Lab</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=Press+Start+2P&display=swap">
+<style>
+  /* Layout: full-bleed stage like the overlay, with one pixel-style control card floating top-left.
+     Single deliberate look (a stream sky), so no dark variant. */
+  :root{
+    --ink:#1f1830; --paper:#fffaf0; --card:#f3ead6; --green:#5cc04a; --amber:#f2a33a; --sky-top:#9fd3ef; --sky-bot:#e8f4ea;
+    --pix:"Press Start 2P", ui-monospace, monospace; --txt:"Pixelify Sans", system-ui, sans-serif;
+    --vx:0 -3px 0 0 var(--ink),0 3px 0 0 var(--ink),-3px 0 0 0 var(--ink),3px 0 0 0 var(--ink);
+    color-scheme: light;
+  }
+  html,body{height:100%}
+  body{margin:0;overflow:hidden;background:linear-gradient(var(--sky-top),var(--sky-bot));color:var(--ink);font:500 15px/1.35 var(--txt)}
+  canvas{display:block;position:fixed;inset:0;cursor:crosshair;touch-action:none}
+  #card{position:fixed;top:calc(16px + env(safe-area-inset-top,0px));left:16px;width:min(300px,calc(100vw - 38px));
+    background:var(--card);box-shadow:var(--vx),5px 5px 0 2px rgba(31,24,48,.3);padding:14px;display:grid;gap:11px;
+    max-height:calc(100% - 40px);overflow:auto}
+  h1{margin:0;font:12px/1.4 var(--pix);letter-spacing:.02em}
+  .lab{font:9px/1 var(--pix);letter-spacing:.08em;text-transform:uppercase;opacity:.75}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button,.act button{font:700 14px/1 var(--txt);color:var(--ink);background:var(--paper);border:0;padding:7px 10px;
+    box-shadow:var(--vx);cursor:pointer;margin:3px}
+  .seg button[aria-pressed="true"]{background:var(--green);color:#fff}
+  .act{display:flex;gap:6px;flex-wrap:wrap}
+  .act button{background:var(--amber)}
+  button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:3px}
+  .row{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center}
+  .row input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--ink);margin:0}
+  .row output{font:9px var(--pix);font-variant-numeric:tabular-nums}
+  label.chk{display:flex;gap:8px;align-items:center;cursor:pointer}
+  label.chk input{accent-color:var(--ink);width:16px;height:16px;margin:0}
+  #status{font:9px/1.7 var(--pix);background:var(--paper);box-shadow:var(--vx);padding:8px 9px;margin:3px;min-height:3.4em}
+  #status b{color:#3f8f33;font-weight:400}
+  #status i{color:#c2701a;font-style:normal}
+  .hint{margin:0;font-size:14px;opacity:.8}
+  .family{display:grid;gap:6px;padding-bottom:10px;border-bottom:3px dashed rgba(31,24,48,.25)}
+  #genes{font:9px/1.6 var(--pix);font-variant-numeric:tabular-nums}
+  #err{position:fixed;right:16px;bottom:16px;max-width:60ch;background:#fff;color:#a00;font:12px monospace;padding:8px;white-space:pre-wrap}
+  #err:empty{display:none}
+  @media (max-width:520px){#card{gap:8px;padding:10px} .hide-sm{display:none}}
+</style>
+
+<div id="card">
+  <h1>Walk Lab</h1>
+  <div class="family">
+    <div class="lab">Family line</div>
+    <div class="seg" id="life">
+      <button id="l-balanced" data-v="balanced" aria-pressed="true">Balanced</button>
+      <button id="l-playful" data-v="playful" aria-pressed="false">Playful</button>
+      <button id="l-social" data-v="social" aria-pressed="false">Social</button>
+      <button id="l-sleepy" data-v="sleepy" aria-pressed="false">Sleepy</button>
+    </div>
+    <div class="row"><span>Generation</span><output id="o-gen"></output><input id="gen" type="range" min="1" max="8" step="1" value="4"></div>
+    <div id="genes"></div>
+  </div>
+  <div>
+    <div class="lab">Movement</div>
+    <div class="seg" id="mode">
+      <button id="m-walk" data-v="walk" aria-pressed="true">Walk</button>
+      <button id="m-hop" data-v="hop" aria-pressed="false">Hop (today)</button>
+    </div>
+  </div>
+  <div>
+    <div class="lab">Pet</div>
+    <div class="seg" id="pet">
+      <button id="p-baby" data-v="baby" aria-pressed="false">Baby</button>
+      <button id="p-teen" data-v="teen" aria-pressed="true">Teen</button>
+      <button id="p-stilts" data-v="stilts" aria-pressed="false">Long legs</button>
+    </div>
+  </div>
+  <div>
+    <div class="lab">Arms</div>
+    <div class="seg" id="arms">
+      <button id="a-none" data-v="none" aria-pressed="false">None</button>
+      <button id="a-stubby" data-v="stubby" aria-pressed="false">Stubby</button>
+      <button id="a-dangly" data-v="dangly" aria-pressed="true">Dangly</button>
+      <button id="a-noodle" data-v="noodle" aria-pressed="false">Noodle</button>
+    </div>
+  </div>
+  <div class="row"><span>Leg length</span><output id="o-leg"></output><input id="leg" type="range" min="0.8" max="6" step="0.1"></div>
+  <div class="row"><span>Pace</span><output id="o-pace"></output><input id="pace" type="range" min="0.5" max="2" step="0.05" value="1"></div>
+  <div class="row"><span>Waddle</span><output id="o-waddle"></output><input id="waddle" type="range" min="0" max="1.2" step="0.05" value="0.6"></div>
+  <label class="chk"><input id="side" type="checkbox"> Turn side-on while walking</label>
+  <label class="chk"><input id="debug" type="checkbox"> Show leg springs and foot targets</label>
+  <label class="chk"><input id="auto" type="checkbox" checked> Wander by itself</label>
+  <div class="act"><button id="shove">Shove</button><button id="big">Knock over</button></div>
+  <div id="status"></div>
+  <p class="hint hide-sm">Click the ground to send it somewhere. Shove it to watch it catch itself with quick steps.</p>
+</div>
+<div id="err"></div>
+
+<script>
+  addEventListener('error', e => { document.getElementById('err').textContent += (e.message || e) + '\n'; });
+  addEventListener('unhandledrejection', e => { document.getElementById('err').textContent += 'Promise: ' + (e.reason?.stack || e.reason) + '\n'; });
+</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "rapier": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import RAPIER from 'rapier';
+
+// Same world rules as the overlay: units are voxels, 160 voxels/s² gravity, near-front camera,
+// bodies locked to the z = 0 plane and only tipping in it.
+const GRAVITY = 160, STEP = 1 / 120, PITCH = 6 * Math.PI / 180, FACE_YAW = 0.42;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v)), lerp = (a, b, t) => a + (b - a) * t;
+const rand = (a, b) => a + Math.random() * (b - a);
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const rollOf = (q) => wrapAngle(2 * Math.atan2(q.z, q.w));
+const smooth = (t) => t * t * (3 - 2 * t);
+
+const PETS = {
+  baby:   { w: 7, h: 6, d: 6, leg: 1.4, body: 0x8fd16a, dark: 0x3d6a32, accent: 0xf2c14e, belly: 0xdcf3c6, ears: 1 },
+  teen:   { w: 8, h: 8, d: 7, leg: 2.4, body: 0x7cc3ef, dark: 0x2c5a84, accent: 0xf59a9a, belly: 0xdaeefb, ears: 2 },
+  stilts: { w: 9, h: 9, d: 8, leg: 4.6, body: 0xf0a35e, dark: 0x6e3c20, accent: 0xffe08a, belly: 0xfde3c4, ears: 3 },
+};
+// Arms hang from the shoulders as a chain of n segments of length len.
+const ARMS = {
+  none: null,
+  stubby: { n: 1, len: 1.8, thick: 1.3, hand: 1.5 },
+  dangly: { n: 2, len: 1.8, thick: 1, hand: 1.4 },
+  noodle: { n: 4, len: 1.5, thick: 0.9, hand: 1.3 },
+};
+// ---- lineage ----
+// Each egg starts from its parent's legs and arms (0..1) and gets a nudge from how the parent lived:
+// playful, hyped parents pass on stronger legs; social, generous ones pass on arms (for waving).
+const TRAITS = ['fed', 'rested', 'playful', 'social', 'hyped', 'calm', 'nightowl', 'generous'];
+const LIVES = { balanced: {}, playful: { playful: 0.4, hyped: 0.2 }, social: { social: 0.3, generous: 0.2 }, sleepy: { rested: 0.35, calm: 0.35 } };
+function traitShares(life) {  // each trait's share of the parent's life, summing to 1
+  const set = LIVES[life], rest = TRAITS.filter(k => !(k in set));
+  const left = 1 - Object.values(set).reduce((a, b) => a + b, 0);
+  return Object.fromEntries(TRAITS.map(k => [k, set[k] ?? left / rest.length]));
+}
+function inherit(g, s) {
+  return {
+    legs: clamp(g.legs + 0.12 + 0.5 * (s.playful + 0.5 * s.hyped), 0, 1),
+    arms: clamp(g.arms + 0.05 + 0.6 * (s.social + s.generous), 0, 1),
+  };
+}
+// Voxel detail isn't inherited from the life: it simply rises each generation (see applyLineage).
+// how the numbers show: under 30% legs it hops, then waddles, and strides from 60%
+const ARM_STAGES = [[0.8, 'noodle'], [0.55, 'dangly'], [0.35, 'stubby'], [0, 'none']];
+const ui = { res: 1.75, gen: 4, life: 'balanced', mode: 'walk', pet: 'teen', arms: 'dangly', leg: null, pace: 1, waddle: 0.6, side: false, debug: false, auto: true };
+
+// ---------------- voxels ----------------
+const FACES = [
+  [[1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]], [[-1, 0, 0], [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]]],
+  [[0, 1, 0], [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]]], [[0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]]],
+  [[0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]], [[0, 0, -1], [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]]],
+];
+function voxMesh(cells, off) {
+  const pos = [], nor = [], col = [], c = new THREE.Color();
+  for (const [k, hex] of cells) {
+    const [x, y, z] = k.split(',').map(Number);
+    c.setHex(hex);
+    for (const [n, q] of FACES) {
+      if (cells.has(`${x + n[0]},${y + n[1]},${z + n[2]}`)) continue;
+      for (const i of [0, 1, 2, 0, 2, 3]) {
+        pos.push(x + q[i][0] + off[0], y + q[i][1] + off[1], z + q[i][2] + off[2]);
+        nor.push(...n); col.push(c.r, c.g, c.b);
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  return new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true }));
+}
+
+// A rounded blob with a belly patch, a face and ears; origin at the centre of its bottom.
+// r is the voxel resolution: the pet keeps its size but is built from r× as many voxels across, and the
+// face and ears scale with it so it keeps its proportions.
+function petMesh(P, r = 1) {
+  const cells = new Map(), w = Math.round(P.w * r), h = Math.round(P.h * r), d = Math.round(P.d * r);
+  const u = (n) => Math.max(1, Math.round(n * r));  // a feature size, in base voxels, at this resolution
+  for (let x = 0; x < w; x++) for (let y = 0; y < h; y++) for (let z = 0; z < d; z++) {
+    const nx = (x + 0.5) / w * 2 - 1, ny = (y + 0.5) / h * 2 - 1, nz = (z + 0.5) / d * 2 - 1;
+    const p = ny < 0 ? 3.4 : 2.4;
+    if (Math.abs(nx) ** p + Math.abs(ny) ** p + Math.abs(nz) ** p > 1.12) continue;
+    cells.set(`${x},${y},${z}`, nz > 0.3 && ny < 0.15 && Math.abs(nx) < 0.6 ? P.belly : P.body);
+  }
+  const front = (x, y) => { for (let z = d - 1; z >= 0; z--) if (cells.has(`${x},${y},${z}`)) return z; return null; };
+  const top = (x, z) => { for (let y = h - 1; y >= 0; y--) if (cells.has(`${x},${y},${z}`)) return y; return null; };
+  const paint = (x0, y0, wd, ht, hex) => {
+    for (let x = x0; x < x0 + wd; x++) for (let y = y0; y < y0 + ht; y++) {
+      const z = front(x, y); if (z !== null) cells.set(`${x},${y},${z}`, hex);
+    }
+  };
+  // eyes: dark squares with a shine in the top-left corner, an even gap apart so the face stays centred
+  const E = u(2), hs = Math.max(1, Math.round(E / 2)), ey = Math.round(h * 0.52);
+  let gap = u(P.w % 2 ? 1 : 2);
+  if ((w - 2 * E - gap) % 2) gap++;
+  const L = (w - 2 * E - gap) / 2;
+  for (const ex of [L, w - L - E]) { paint(ex, ey, E, E, P.dark); paint(ex, ey + E - hs, hs, hs, 0xffffff); }
+  const b = u(1);
+  paint(Math.max(0, L - b), ey - b, b, b, 0xf7a1b4); paint(w - L, ey - b, b, b, 0xf7a1b4);
+  let mw = u(2);
+  if ((w - mw) % 2) mw++;
+  paint((w - mw) / 2, ey - b, mw, Math.max(1, Math.round(r * 0.7)), P.dark);
+  // ears stand on top of the head, as tall as the recipe says, tipped with the accent colour
+  const ew = u(1), eh = u(P.ears), tip = P.ears > 1 ? u(1) : 0, zm = Math.floor((d - ew) / 2);
+  for (const ex of [L, w - L - ew]) for (let x = ex; x < ex + ew; x++) for (let z = zm; z < zm + ew; z++) {
+    const ty = top(x, z) ?? h - 1;
+    for (let i = 1; i <= eh; i++) cells.set(`${x},${ty + i},${z}`, i > eh - tip ? P.accent : P.body);
+  }
+  const m = voxMesh(cells, [-w / 2, 0, -d / 2]);
+  m.scale.setScalar(1 / r);
+  return m;
+}
+
+// ---------------- scene ----------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setClearColor(0, 0);
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 1000);
+const camUp = new THREE.Vector3(0, Math.cos(PITCH), -Math.sin(PITCH));
+const camBack = new THREE.Vector3(0, Math.sin(PITCH), Math.cos(PITCH));
+scene.add(new THREE.HemisphereLight(0xfff4e8, 0x8a7aa8, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+sun.position.set(-0.45, 0.8, 0.9);
+scene.add(sun);
+let PX = 10;
+
+await RAPIER.init();
+const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
+world.timestep = STEP;
+const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+const G = { WORLD: 1, PET: 2 };
+const groups = (member, filter) => (member << 16) | filter;
+const B = { left: -55, right: 55 };
+
+// Terrain: a floor, a low step and a hill with ramps, so you can see feet find the ground.
+const DEPTH = 18;
+function solid(points2d, color, topColor) {
+  const shape = new THREE.Shape(points2d.map(([x, y]) => new THREE.Vector2(x, y)));
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: DEPTH, bevelEnabled: false });
+  geo.translate(0, 0, -DEPTH / 2);
+  const m = new THREE.Mesh(geo, [new THREE.MeshLambertMaterial({ color }), new THREE.MeshLambertMaterial({ color: topColor })]);
+  // ExtrudeGeometry puts caps in group 0 and sides in group 1; colour the caps (front face) as dirt,
+  // the sides (including the walkable top) as grass.
+  scene.add(m);
+  const verts = [];
+  for (const [x, y] of points2d) verts.push(x, y, -DEPTH / 2, x, y, DEPTH / 2);
+  world.createCollider(RAPIER.ColliderDesc.convexHull(new Float32Array(verts)).setFriction(0.9)
+    .setCollisionGroups(groups(G.WORLD, 0xffff)), ground);
+}
+solid([[-200, -40], [200, -40], [200, 0], [-200, 0]], 0xb98a5a, 0x6cc25a);
+solid([[-17, 0], [-11, 0], [-11, 0.9], [-17, 0.9]], 0xa47a50, 0x6cc25a);
+solid([[14, 0], [46, 0], [37, 3.2], [25, 3.2]], 0xa47a50, 0x6cc25a);
+let walls = [];
+function layout() {
+  const W = innerWidth, H = innerHeight;
+  renderer.setSize(W, H);
+  PX = clamp(W / 120, 4.5, 14);
+  const hw = W / 2 / PX, hh = H / 2 / PX, groundPx = Math.max(70, H * 0.2);
+  cam.left = -hw; cam.right = hw; cam.top = hh; cam.bottom = -hh;
+  const shift = -(-hh + groundPx / PX);
+  cam.position.copy(camBack).multiplyScalar(300).addScaledVector(camUp, shift);
+  cam.lookAt(cam.position.clone().sub(camBack));
+  cam.updateProjectionMatrix();
+  B.left = Math.max(-58, -hw + 2); B.right = Math.min(58, hw - 2);
+  for (const c of walls) world.removeCollider(c, false);
+  walls = [B.left - 5, B.right + 5].map(x => world.createCollider(RAPIER.ColliderDesc.cuboid(5, 80, 20)
+    .setTranslation(x, 60, 0).setCollisionGroups(groups(G.WORLD, 0xffff)), ground));
+}
+layout();
+addEventListener('resize', layout);
+
+// soft shadow
+const SHADOW = (() => {
+  const c = document.createElement('canvas'); c.width = 64; c.height = 32;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 16, 0, 32, 16, 32);
+  gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(0.55, 'rgba(0,0,0,.7)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.setTransform(1, 0, 0, 0.5, 0, 8); g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+const footShadowGeo = new THREE.PlaneGeometry(1, 1);
+const shadowMat = new THREE.MeshBasicMaterial({ map: SHADOW, transparent: true, opacity: 0.3, depthWrite: false });
+
+// dust puffs at footfalls
+const dust = [], dustGeo = new THREE.BoxGeometry(1, 1, 1), dustMat = new THREE.MeshLambertMaterial({ color: 0xe9dcc0 });
+function puff(x, y, n, dir = 0) {
+  for (let i = 0; i < n; i++) {
+    const m = new THREE.Mesh(dustGeo, dustMat);
+    m.position.set(x + rand(-0.5, 0.5), y + 0.2, rand(-1, 2));
+    scene.add(m);
+    dust.push({ m, vx: rand(-4, 4) - dir * 3, vy: rand(2, 6), life: rand(0.3, 0.5), t: 0 });
+  }
+}
+
+// debug lines
+const DBG_MAX = 64, dbgGeo = new THREE.BufferGeometry();
+dbgGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(DBG_MAX * 3), 3));
+dbgGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(DBG_MAX * 3), 3));
+const dbg = new THREE.LineSegments(dbgGeo, new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false }));
+dbg.frustumCulled = false;
+dbg.renderOrder = 10; scene.add(dbg);
+
+const DOWN = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const tv = new THREE.Vector3(), tv2 = new THREE.Vector3();
+
+// ---------------- the pet ----------------
+class Pet {
+  constructor(key, x) { this.build(key, x); }
+
+  build(key, x) {
+    if (this.root) scene.remove(this.root, ...this.legs.flatMap(l => [l.thigh, l.shin, l.knee, l.foot, l.shadow]));
+    this.removeArms();
+    if (this.body) world.removeRigidBody(this.body);
+    const P = this.P = PETS[key];
+    this.L = ui.leg ?? P.leg;                     // leg length below the body, in voxels
+    this.hx = P.w / 2; this.hy = P.h / 2; this.hz = P.d / 2;
+    this.hipX = Math.max(1, P.w * 0.24);          // hips sit this far either side of centre
+    this.hipY = -this.hy + 0.6;                   // ... and a little up inside the body
+    this.reach = this.L + 0.6;                    // hip to ground with the leg straight
+    this.thick = this.L < 2 ? 1.6 : this.L < 3.5 ? 1.2 : 1;
+    this.inertia = 0;
+    const r = Math.min(this.hx, this.hy, this.hz) * 0.45;
+    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(x, this.reach * 0.94 - this.hipY + 1, 0).enabledTranslations(true, true, false)
+      .enabledRotations(false, false, true).setAngularDamping(1.5).setCcdEnabled(true));
+    world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
+      .setDensity(1).setFriction(0.9).setRestitution(0.05)
+      .setCollisionGroups(groups(G.PET, G.WORLD)), this.body);
+    this.inertia = this.body.mass() * (P.w * P.w + P.h * P.h) / 12;
+    this.upright = Math.max(60, 20 * P.h - 30);
+
+    this.root = new THREE.Group();
+    this.squash = new THREE.Group(); this.squash.position.y = -this.hy;
+    this.root.add(this.squash);
+    this.squash.add(petMesh(P, ui.res));
+    scene.add(this.root);
+    this.shadow ??= new THREE.Mesh(footShadowGeo, shadowMat);
+    scene.add(this.shadow);
+
+    const dark = new THREE.MeshLambertMaterial({ color: P.dark }), acc = new THREE.MeshLambertMaterial({ color: P.accent });
+    this.legs = [-1, 1].map(side => {
+      const leg = { side, planted: true, swinging: false, t: 0, fx: x + side * this.hipX, fy: 0, from: { x: 0, y: 0 }, tx: 0,
+        thigh: new THREE.Mesh(unitBox, dark), shin: new THREE.Mesh(unitBox, dark), knee: new THREE.Mesh(unitBox, dark), foot: new THREE.Mesh(unitBox, acc),
+        shadow: new THREE.Mesh(footShadowGeo, shadowMat) };
+      scene.add(leg.thigh, leg.shin, leg.knee, leg.foot, leg.shadow);
+      return leg;
+    });
+    this.roll = 0; this.yaw = 0; this.yawV = 0; this.facing = 0; this.sq = 0; this.sqV = 0;
+    this.air = true; this.dazed = 0; this.leanT = 0; this.crouch = 0;
+    this.goal = null; this.wait = 1; this.vd = 0; this.sinceStep = 1; this.steps = []; this.idleT = 0;
+    this.buildArms();
+  }
+
+  removeArms() { for (const a of this.arms ?? []) scene.remove(...a.segs, ...a.joints, a.hand); this.arms = []; }
+
+  // Each arm is a chain of points hanging from its shoulder (verlet: a point's velocity is just how far
+  // it moved last step), so it trails behind the body and flops about when the body jolts.
+  buildArms() {
+    this.removeArms();
+    const A = ARMS[ui.arms];
+    if (!A) return;
+    const armMat = new THREE.MeshLambertMaterial({ color: new THREE.Color(this.P.body).multiplyScalar(0.82) });
+    const handMat = new THREE.MeshLambertMaterial({ color: this.P.belly });
+    this.arms = [-1, 1].map(side => {
+      const r = this.shoulder(side), pts = [];
+      for (let i = 0; i <= A.n; i++) pts.push({ x: r.x + side * i * 0.3, y: r.y - i * A.len, px: r.x + side * i * 0.3, py: r.y - i * A.len });
+      const arm = { side, A, pts, z: r.z, v: pts.map(() => new THREE.Vector3()),
+        segs: Array.from({ length: A.n }, () => new THREE.Mesh(unitBox, armMat)),
+        joints: Array.from({ length: A.n - 1 }, () => new THREE.Mesh(unitBox, armMat)), hand: new THREE.Mesh(unitBox, handMat) };
+      scene.add(...arm.segs, ...arm.joints, arm.hand);
+      return arm;
+    });
+  }
+
+  pos() { return this.body.translation(); }
+
+  // Half the body's width as the camera sees it, turned by yaw (a rounded body, so not box corners).
+  silhouette() { return Math.hypot(this.hx * Math.cos(this.yaw), this.hz * Math.sin(this.yaw)); }
+
+  // Shoulder position in the world: on the edge of the body's outline, a little below the middle.
+  shoulder(side, out = { x: 0, y: 0, z: 0 }) {
+    const p = this.pos(), c = Math.cos(this.roll), s = Math.sin(this.roll);
+    const lx = side * this.silhouette() * Math.sqrt(1 - 0.15 ** 2), lz = -side * this.hx * Math.sin(this.yaw), ly = -this.hy * 0.15;
+    out.x = p.x + lx * c - ly * s; out.y = p.y + lx * s + ly * c; out.z = lz;
+    return out;
+  }
+
+  updateArms(dt) {
+    if (!this.arms.length) return;
+    const p = this.pos(), c = Math.cos(this.roll), s = Math.sin(this.roll);
+    // the body's outline seen from the camera, padded by half an arm, for keeping arms outside it
+    const pad = (this.arms[0].A.thick) / 2 + 0.1;
+    const rx = this.silhouette() + pad, ry = this.hy + pad;
+    const walking = ui.mode === 'walk' && !this.air && this.dazed <= 0 && Math.abs(this.vd) > 0.1;
+    for (const arm of this.arms) {
+      const { pts, A } = arm, root = this.shoulder(arm.side), floor = this.groundAt(root.x, p.y) + 0.5;
+      arm.z = root.z;
+      // walking, each arm swings the way the opposite leg is stepping
+      const leg = this.legs.find(l => l.side === -arm.side), H = this.hip(leg.side);
+      const swing = walking ? clamp(leg.fx - H.x, -2.5, 2.5) * 0.9 : 0, end = pts[pts.length - 1];
+      for (let k = Math.max(1, Math.ceil(dt / (1 / 120))), h = dt / k; k > 0; k--) {
+        pts[0].x = root.x; pts[0].y = root.y;
+        for (let i = 1; i < pts.length; i++) {
+          const q = pts[i], vx = (q.x - q.px) * 0.985, vy = (q.y - q.py) * 0.985;
+          q.px = q.x; q.py = q.y;
+          q.x += vx; q.y += vy - GRAVITY * h * h;
+        }
+        // a light nudge, so the swing never beats gravity and the arm still hangs
+        if (walking) end.x += (root.x + swing - end.x) * 0.006;
+        for (let it = 0; it < 4; it++) {
+          for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1e-6, k2 = (d - A.len) / d;
+            if (i === 1) { b.x -= dx * k2; b.y -= dy * k2; }
+            else { a.x += dx * k2 / 2; a.y += dy * k2 / 2; b.x -= dx * k2 / 2; b.y -= dy * k2 / 2; }
+          }
+          for (let i = 1; i < pts.length; i++) {
+            const q = pts[i], ox = q.x - p.x, oy = q.y - p.y;
+            // inside the body: slide it sideways out to the edge at that height, so the arm hangs
+            // down along the flank instead of being shoved out from the middle like a wing
+            const lx = ox * c + oy * s, ly = -ox * s + oy * c;
+            if (Math.abs(ly) < ry && (lx / rx) ** 2 + (ly / ry) ** 2 < 1) {
+              const nx = (Math.sign(lx) || arm.side) * rx * Math.sqrt(1 - (ly / ry) ** 2);
+              q.x = p.x + nx * c - ly * s; q.y = p.y + nx * s + ly * c;
+            }
+            if (q.y < floor) { q.y = floor; q.px = lerp(q.px, q.x, 0.5); }
+          }
+        }
+      }
+      // draw: segments end exactly at each joint, joint blocks turned halfway between neighbours
+      for (const [i, q] of pts.entries()) arm.v[i].set(q.x, q.y, arm.z);
+      for (let i = 0; i < A.n; i++) seg(arm.segs[i], arm.v[i], arm.v[i + 1], A.thick, i === 0 ? 0.6 : 0, 0);
+      for (let i = 0; i < A.n - 1; i++) {
+        const mid = tv.subVectors(arm.v[i + 1], arm.v[i]).normalize().add(tv2.subVectors(arm.v[i + 2], arm.v[i + 1]).normalize());
+        arm.joints[i].position.copy(arm.v[i + 1]);
+        orient(arm.joints[i], mid.lengthSq() > 1e-6 ? mid.normalize() : tv2);
+        arm.joints[i].scale.setScalar(A.thick);
+      }
+      const last = tv.subVectors(arm.v[A.n], arm.v[A.n - 1]).normalize();
+      arm.hand.position.copy(arm.v[A.n]).addScaledVector(last, A.hand * 0.35);
+      orient(arm.hand, last);
+      arm.hand.scale.setScalar(A.hand);
+    }
+  }
+
+  // Hip position in the world, from the body's position, its tip in the screen plane and how far it
+  // has turned toward its walking direction.
+  hip(side, out = { x: 0, y: 0, z: 0 }) {
+    const p = this.pos(), c = Math.cos(this.roll), s = Math.sin(this.roll);
+    const lx = side * this.hipX * Math.cos(this.yaw), lz = -side * this.hipX * Math.sin(this.yaw), ly = this.hipY;
+    out.x = p.x + lx * c - ly * s; out.y = p.y + lx * s + ly * c; out.z = lz;
+    return out;
+  }
+
+  groundAt(x, fromY) {
+    DOWN.origin = { x, y: fromY, z: 0 };
+    const hit = world.castRay(DOWN, 80, true, undefined, groups(G.PET, G.WORLD), undefined, this.body);
+    return hit ? fromY - hit.timeOfImpact : -40;
+  }
+
+  // How long a step takes and how far a foot reaches, from the leg length and the pace slider.
+  // The walking speed follows from those, so short legs patter and long legs stride.
+  gait() {
+    const swingT = (0.09 + 0.035 * this.L) / Math.sqrt(ui.pace);
+    const reach = (0.4 + 0.2 * ui.pace) * this.L + 0.45;
+    return { swingT, reach, speed: 0.7 * reach / swingT };
+  }
+
+  face(f) { if (f !== this.facing) { this.facing = f; this.sqV += 0.6; } }
+
+  // ---- brain: pick somewhere to go, then walk or hop there ----
+  think(dt) {
+    const p = this.pos();
+    if (this.goal === null) {
+      this.vd = 0;
+      if (ui.auto && (this.wait -= dt) <= 0) {
+        let g; do g = rand(B.left + 8, B.right - 8); while (Math.abs(g - p.x) < 14);
+        this.goal = g;
+      }
+      if ((this.idleT += dt) > 1.2) this.face(0);
+      return;
+    }
+    this.idleT = 0;
+    const dx = this.goal - p.x, near = ui.mode === 'walk' ? 0.8 : 2;
+    if (Math.abs(dx) < near) { this.goal = null; this.wait = rand(1, 3); this.vd = 0; return; }
+    if (Math.abs(dx) > 0.5) this.face(Math.sign(dx));
+    if (ui.mode === 'walk') this.vd = Math.sign(dx) * this.gait().speed * clamp(Math.abs(dx) / 5, 0.3, 1);
+    else this.hopToward(dx, dt);
+  }
+
+  // The overlay's hop, unchanged: crouch for a moment, then one impulse up and along.
+  hopToward(dx, dt) {
+    this.vd = 0;
+    if (this.air || this.dazed > 0 || Math.abs(this.roll) > 0.7) return;
+    this.crouch += dt;
+    if (this.crouch > 0.14) {
+      this.crouch = 0;
+      const b = this.body, v = b.linvel(), m = b.mass(), dist = Math.abs(dx);
+      const legs = this.L > 3 ? 1.2 : 1;
+      const hopV = (12 + 2.5 * this.P.h) * legs * (dist < 6 ? 0.6 : 1);
+      const hs = Math.min(7 + this.P.w, dist / (2 * hopV / GRAVITY));
+      b.applyImpulse({ x: m * (Math.sign(dx) * hs - v.x), y: m * (hopV - v.y), z: 0 }, true);
+      if (Math.abs(this.roll) > 0.15) b.applyTorqueImpulse({ x: 0, y: 0, z: -this.roll * this.inertia * 3 }, true);
+      this.takeOff(); this.sqV += 3;
+    }
+  }
+
+  takeOff() { this.air = true; for (const l of this.legs) { l.planted = false; l.swinging = false; } }
+
+  rightItself(power) {
+    const b = this.body, m = b.mass(), lean = Math.sign(this.roll) || 1;
+    b.applyImpulse({ x: lean * m * 6 * power, y: m * (12 + 2.5 * this.P.h) * 0.7 * power, z: 0 }, true);
+    b.applyTorqueImpulse({ x: 0, y: 0, z: -this.roll * this.inertia * 5 * power }, true);
+    this.takeOff(); this.sqV += 2;
+  }
+
+  // ---- physics: legs hold the body up and push it along ----
+  step(dt) {
+    const b = this.body, p = this.pos(), v = b.linvel(), w = b.angvel().z, m = b.mass();
+    this.roll = rollOf(b.rotation());
+    const { swingT, reach } = this.gait();
+    this.sinceStep += dt;
+
+    if (Math.abs(this.roll) > 1.0 && this.dazed <= 0) { this.dazed = 1.5; this.takeOff(); }
+    const hipMid = p.y + this.hipY * Math.cos(this.roll), gMid = this.groundAt(p.x, p.y);
+    const hipH = hipMid - gMid;
+    if (this.dazed > 0) {
+      this.dazed -= dt;
+      if (this.dazed <= 0) { if (hipH < this.reach + 1.5) this.rightItself(1.2); else this.dazed = 0.3; }
+    }
+    this.leanT = Math.abs(this.roll) > 0.4 && this.dazed <= 0 && !this.air ? this.leanT + dt : 0;
+    if (this.leanT > 0.6) { this.leanT = 0; this.rightItself(0.7); }
+
+    // stay upright, leaning a little into the direction of travel
+    if (this.dazed <= 0) {
+      const lean = ui.mode === 'walk' ? clamp(-v.x * 0.012, -0.2, 0.2) : 0;
+      const kd = 2 * Math.sqrt(this.upright) * 0.75;
+      b.applyTorqueImpulse({ x: 0, y: 0, z: this.inertia * (-this.upright * (this.roll - lean) - kd * w) * dt }, true);
+    }
+
+    // airborne <-> standing
+    if (!this.air && hipH > this.reach * 1.25) this.takeOff();
+    if (this.air && this.dazed <= 0 && v.y <= 1 && hipH <= this.reach) {
+      this.air = false;
+      this.sqV -= clamp(-v.y * 0.03, 0, 2);
+      for (const l of this.legs) {
+        const H = this.hip(l.side);
+        l.fx = clamp(l.fx, H.x - reach, H.x + reach); l.fy = this.groundAt(l.fx, H.y + 1);
+        l.planted = true; l.swinging = false;
+      }
+      if (-v.y > 25) puff(p.x, gMid, 5);
+    }
+
+    const H = this.legs.map(l => this.hip(l.side));
+    if (this.air || this.dazed > 0) {
+      // legs dangle from the hips, swinging behind the motion a little
+      for (const [i, l] of this.legs.entries()) {
+        const s = Math.sin(this.roll), c = Math.cos(this.roll), len = this.reach * 0.9;
+        const tx = H[i].x + len * s - v.x * 0.01, ty = H[i].y - len * c - v.y * 0.006;
+        const k = Math.min(1, dt * 18);
+        l.fx += (tx - l.fx) * k; l.fy += (ty - l.fy) * k;
+        l.fy = Math.max(l.fy, this.groundAt(l.fx, H[i].y + 1));
+      }
+      return;
+    }
+
+    // ---- foot placement (Raibert-style) ----
+    // Each foot aims a little ahead of its hip, further when moving fast, and further still when moving
+    // faster than it wants to (that's what catches it after a shove).
+    const Tst = swingT * 1.2;
+    for (const [i, l] of this.legs.entries()) {
+      let tx = H[i].x + v.x * Tst * 0.5 + 0.04 * (v.x - this.vd);
+      if (ui.mode === 'hop') tx = H[i].x;
+      l.tx = clamp(tx, H[i].x - reach, H[i].x + reach);
+    }
+    for (const [i, l] of this.legs.entries()) {
+      if (l.planted || l.swinging) continue;
+      if (ui.mode === 'walk') { l.swinging = true; l.t = 0; l.from = { x: l.fx, y: l.fy }; }
+      else { l.planted = true; l.fy = this.groundAt(l.fx, H[i].y + 1); }
+    }
+    if (ui.mode === 'walk') {
+      const thresh = 0.3 * reach + 0.15;
+      const order = [...this.legs].sort((a, c) => Math.abs(c.fx - c.tx) - Math.abs(a.fx - a.tx));
+      for (const l of order) {
+        const other = this.legs.find(o => o !== l), Hl = H[this.legs.indexOf(l)];
+        const err = Math.abs(l.fx - l.tx), stretched = Math.hypot(Hl.x - l.fx, Hl.y - l.fy) > this.reach * 1.06;
+        if (l.planted && !l.swinging && !other.swinging && other.planted && (err > thresh || stretched)) {
+          l.swinging = true; l.t = 0; l.from = { x: l.fx, y: l.fy };
+          break;
+        }
+      }
+    } else {
+      // hopping: feet stay put under the hips, like the overlay's fixed feet
+      for (const [i, l] of this.legs.entries()) { l.fx += (l.tx - l.fx) * Math.min(1, dt * 30); l.fy = this.groundAt(l.fx, H[i].y + 1); }
+    }
+    for (const [i, l] of this.legs.entries()) {
+      if (!l.swinging) continue;
+      l.t += dt / swingT;
+      const gy = this.groundAt(l.tx, H[i].y + 1), t = Math.min(1, l.t);
+      l.fx = lerp(l.from.x, l.tx, smooth(t));
+      l.fy = Math.max(lerp(l.from.y, gy, t) + (0.25 * this.L + 0.45) * Math.sin(Math.PI * t), this.groundAt(l.fx, H[i].y + 1));
+      if (l.t >= 1) {
+        l.swinging = false; l.planted = true; l.fx = l.tx; l.fy = gy;
+        this.sqV -= 0.35; this.sinceStep = 0; this.steps.push(performance.now());
+        if (Math.abs(v.x) > 4) puff(l.fx, gy, 1, Math.sign(v.x));
+      }
+    }
+
+    // ---- support: each standing leg is a springy strut ----
+    // It holds its hip at the height a straight leg would reach over that foot, so the body rises as it
+    // passes over a foot and dips between steps, like an inverted pendulum. With one foot down, the push
+    // is off-centre and the body rocks: that's the waddle.
+    const stance = this.legs.filter(l => l.planted && !l.swinging);
+    let Fy = 0, sx = 0, sy = 0;
+    const kp = 480, kd = 35, Lr = this.reach * 0.94 * (this.crouch > 0 ? 0.72 : 1);
+    for (const l of stance) {
+      const Hl = H[this.legs.indexOf(l)], dx = Hl.x - l.fx, hCur = Hl.y - l.fy;
+      if (Math.hypot(dx, hCur) > this.reach * 1.15) { l.planted = false; continue; } // foot left behind
+      const hT = Math.sqrt(Math.max(0.3 * Lr * Lr, Lr * Lr - dx * dx));
+      const vy = v.y + w * (Hl.x - p.x);
+      const a = clamp(GRAVITY / stance.length + (kp * (hT - hCur) - kd * vy) / stance.length, 0, GRAVITY * 4);
+      const at = { x: p.x + (Hl.x - p.x) * ui.waddle, y: Hl.y, z: 0 };
+      b.applyImpulseAtPoint({ x: 0, y: m * a * dt, z: 0 }, at, true);
+      Fy += m * a; sx += l.fx; sy += l.fy;
+    }
+    const n = stance.filter(l => l.planted).length;
+    if (n) {
+      // push toward the wanted speed, plus gravity tipping the body over its feet; all limited by grip
+      sx /= n; sy /= n;
+      let ax = 10 * (this.vd - v.x);
+      if (ui.mode === 'walk') ax += 0.5 * GRAVITY * (p.x - sx) / Math.max(1, p.y - sy);
+      ax = clamp(ax, -1.2 * Fy / m, 1.2 * Fy / m);
+      b.applyImpulse({ x: m * ax * dt, y: 0, z: 0 }, true);
+    }
+  }
+
+  shove(power) {
+    const b = this.body, m = b.mass(), dir = Math.random() < 0.5 ? -1 : 1;
+    if (power > 1) {
+      // knocked off its feet: it goes limp straight away, so the upright spring doesn't catch it
+      b.applyImpulse({ x: dir * m * 45, y: m * 30, z: 0 }, true);
+      b.applyTorqueImpulse({ x: 0, y: 0, z: -dir * this.inertia * 14 }, true);
+      this.takeOff(); this.dazed = 1.8;
+    } else {
+      b.applyImpulse({ x: dir * m * rand(22, 30), y: m * 4, z: 0 }, true);
+    }
+  }
+
+  // ---- visuals ----
+  update(dt) {
+    const p = this.pos(), v = this.body.linvel();
+    this.root.position.set(p.x, p.y, 0);
+    this.root.rotation.z = this.roll;
+    const yawMax = ui.side && ui.mode === 'walk' && Math.abs(this.vd) > 0.1 ? 1.25 : FACE_YAW;
+    const target = this.air ? clamp(v.y * 0.004, -0.08, 0.12) : this.crouch > 0 && ui.mode === 'hop' ? -0.18 : 0;
+    for (let k = Math.ceil(dt / (1 / 120)), h = dt / k; k > 0; k--) {
+      this.yawV += ((this.facing * yawMax - this.yaw) * 500 - this.yawV * 34) * h;
+      this.yaw = clamp(this.yaw + this.yawV * h, -1.4, 1.4);
+      this.sqV += ((target - this.sq) * 260 - this.sqV * 14) * h;
+      this.sq = clamp(this.sq + this.sqV * h, -0.35, 0.3);
+    }
+    this.squash.rotation.y = this.yaw;
+    const sy = 1 + this.sq, sxz = 1 / Math.sqrt(sy);
+    this.squash.scale.set(sxz, sy, sxz);
+    const gMid = this.groundAt(p.x, p.y);
+    this.shadow.position.set(p.x, gMid, 0);
+    this.shadow.scale.set(this.P.w * 1.3 * clamp(1 - (p.y - gMid - this.reach) * 0.02, 0.4, 1.1), 2.6, 1);
+    this.shadow.rotation.x = -PITCH;
+
+    // two-bone legs from hip to ankle, knees bending toward where it faces
+    const front = tv2.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)), footH = 0.6, segLen = Math.max(0.4, this.reach - footH);
+    const lines = [], cols = [];
+    legFront.copy(front);
+    for (const l of this.legs) {
+      const Hh = this.hip(l.side), hip = new THREE.Vector3(Hh.x, Hh.y, Hh.z);
+      const ankle = new THREE.Vector3(l.fx, l.fy + footH, Hh.z);
+      const full = hip.distanceTo(ankle), d = Math.min(full, segLen * 0.999);
+      const dir = new THREE.Vector3().subVectors(ankle, hip).normalize();
+      ankle.copy(hip).addScaledVector(dir, Math.min(full, segLen + 0.4));
+      // The thigh runs up into the body and the shin down into the foot, where the overlap is hidden.
+      // At the knee both stop exactly at the joint, and one block turned halfway between them fills the gap.
+      if (this.L < 1.6) {
+        seg(l.thigh, hip, ankle, this.thick, 0.5, 0.3); l.shin.visible = l.knee.visible = false;
+      } else {
+        const bend = front.clone().addScaledVector(dir, -front.dot(dir)).normalize();
+        const knee = hip.clone().addScaledVector(dir, d / 2).addScaledVector(bend, Math.sqrt(Math.max(0, (segLen / 2) ** 2 - (d / 2) ** 2)));
+        seg(l.thigh, hip, knee, this.thick, 0.5, 0); seg(l.shin, knee, ankle, this.thick, 0, 0.3);
+        const mid = new THREE.Vector3().subVectors(knee, hip).normalize().add(tv.subVectors(ankle, knee).normalize());
+        l.knee.position.copy(knee);
+        orient(l.knee, mid.lengthSq() > 1e-6 ? mid.normalize() : dir);
+        l.knee.scale.setScalar(this.thick);
+        l.shin.visible = l.knee.visible = true;
+      }
+      const fl = this.thick + 0.9;
+      l.foot.scale.set(fl, footH + 0.1, this.thick + 0.5);
+      l.foot.position.set(ankle.x, ankle.y - footH / 2, ankle.z).addScaledVector(front, 0.35);
+      l.foot.rotation.set(0, this.yaw - Math.PI / 2, 0);
+      const gy = this.groundAt(l.fx, Hh.y + 1);
+      l.shadow.position.set(l.fx, gy, Hh.z + 0.1);
+      l.shadow.scale.set(2.4 * clamp(1 - (l.fy - gy) * 0.25, 0.3, 1), 1.2, 1);
+      l.shadow.rotation.x = -PITCH;
+      if (ui.debug) {
+        const c = l.swinging ? [0.95, 0.55, 0.1] : l.planted && !this.air ? [0.1, 0.65, 0.2] : [0.6, 0.6, 0.6];
+        lines.push(hip.x, hip.y, 6, l.fx, l.fy, 6); cols.push(...c, ...c);
+        if (!this.air) { lines.push(l.tx - 0.6, gy + 0.05, 6, l.tx + 0.6, gy + 0.05, 6, l.tx, gy - 0.6, 6, l.tx, gy + 0.7, 6); cols.push(...Array(12).fill(0).map((_, j) => [0.85, 0.2, 0.5][j % 3])); }
+      }
+    }
+    if (ui.debug) {
+      lines.push(p.x - 0.5, p.y, 6, p.x + 0.5, p.y, 6, p.x, p.y - 0.5, 6, p.x, p.y + 0.5, 6); cols.push(...Array(12).fill(0.15));
+    }
+    this.updateArms(dt);
+    dbg.visible = ui.debug;
+    if (ui.debug) {
+      dbgGeo.attributes.position.array.set(lines.slice(0, DBG_MAX * 3)); dbgGeo.attributes.color.array.set(cols.slice(0, DBG_MAX * 3));
+      dbgGeo.attributes.position.needsUpdate = dbgGeo.attributes.color.needsUpdate = true;
+      dbgGeo.setDrawRange(0, Math.min(DBG_MAX, lines.length / 3));
+    }
+  }
+}
+
+// Point a leg box along dir without letting it spin about its own length: one face always looks the
+// way the pet faces (legFront), so the boxes tilt as the leg swings but never twist.
+const legFront = new THREE.Vector3(0, 0, 1), basis = new THREE.Matrix4(), bx = new THREE.Vector3(), bz = new THREE.Vector3();
+function orient(mesh, dir) {
+  bx.crossVectors(dir, legFront);
+  if (bx.lengthSq() < 1e-6) bx.set(1, 0, 0);
+  bx.normalize();
+  bz.crossVectors(bx, dir);
+  mesh.quaternion.setFromRotationMatrix(basis.makeBasis(bx, dir, bz));
+}
+// A box from a to b, run on past a by extA and past b by extB.
+const segDir = new THREE.Vector3();
+function seg(mesh, a, b, thick, extA = 0, extB = 0) {
+  const len = a.distanceTo(b);
+  segDir.subVectors(b, a).normalize();
+  mesh.position.addVectors(a, b).multiplyScalar(0.5).addScaledVector(segDir, (extB - extA) / 2);
+  orient(mesh, segDir);
+  mesh.scale.set(thick, len + extA + extB, thick);
+}
+
+let pet = new Pet(ui.pet, 0);
+
+// ---------------- controls ----------------
+const $ = (id) => document.getElementById(id);
+function syncLeg() { $('leg').value = pet.L; $('o-leg').textContent = pet.L.toFixed(1) + ' vox'; }
+function rebuild() { const x = pet.pos().x; pet.build(ui.pet, x); syncLeg(); }
+function setSeg(grp, v) {
+  for (const b of $(grp).children) b.setAttribute('aria-pressed', String(b.dataset.v === v));
+  ui[grp] = v;
+}
+function applyLineage() {
+  let g = { legs: 0, arms: 0 };
+  for (let i = 1; i < ui.gen; i++) g = inherit(g, traitShares(ui.life));
+  ui.leg = 0.8 + 4 * g.legs;
+  ui.res = 1 + 0.25 * (ui.gen - 1);  // finer voxels every generation, whatever the parents did
+  setSeg('mode', g.legs >= 0.3 ? 'walk' : 'hop');
+  setSeg('arms', ARM_STAGES.find(([t]) => g.arms >= t)[1]);
+  rebuild();
+  $('o-gen').textContent = 'gen ' + ui.gen;
+  const move = g.legs < 0.3 ? 'hops' : g.legs < 0.6 ? 'waddles' : 'strides';
+  $('genes').innerHTML = `legs ${Math.round(g.legs * 100)}% · arms ${Math.round(g.arms * 100)}% · detail ×${ui.res}<br>` +
+    `${move}${ui.arms === 'none' ? ', no arms yet' : `, ${ui.arms} arms`}`;
+}
+$('gen').addEventListener('input', (e) => { ui.gen = +e.target.value; applyLineage(); });
+$('life').addEventListener('click', (e) => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  setSeg('life', btn.dataset.v); applyLineage();
+});
+for (const grp of ['mode', 'pet', 'arms']) {
+  $(grp).addEventListener('click', (e) => {
+    const btn = e.target.closest('button'); if (!btn) return;
+    for (const b of $(grp).children) b.setAttribute('aria-pressed', String(b === btn));
+    ui[grp] = btn.dataset.v;
+    if (grp === 'pet') { ui.leg = null; rebuild(); }
+    else if (grp === 'arms') pet.buildArms();
+    else { pet.crouch = 0; for (const l of pet.legs) l.swinging = false; }
+  });
+}
+$('leg').addEventListener('input', (e) => { ui.leg = +e.target.value; rebuild(); });
+$('pace').addEventListener('input', (e) => { ui.pace = +e.target.value; $('o-pace').textContent = '×' + ui.pace.toFixed(2); });
+$('waddle').addEventListener('input', (e) => { ui.waddle = +e.target.value; $('o-waddle').textContent = Math.round(ui.waddle * 100) + '%'; });
+for (const k of ['side', 'debug', 'auto']) $(k).addEventListener('change', (e) => { ui[k] = e.target.checked; });
+$('shove').addEventListener('click', () => pet.shove(1));
+$('big').addEventListener('click', () => pet.shove(2));
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  const x = (e.clientX - innerWidth / 2) / PX;
+  pet.goal = clamp(x, B.left + 3, B.right - 3);
+});
+applyLineage();
+$('o-pace').textContent = '×1.00'; $('o-waddle').textContent = '60%';
+
+function status() {
+  const now = performance.now();
+  pet.steps = pet.steps.filter(t => now - t < 2000);
+  const v = pet.body.linvel(), legState = (l) => pet.dazed > 0 ? '<i>limp</i>' : pet.air ? 'tucked' : l.swinging ? '<i>swinging</i>' : '<b>planted</b>';
+  $('status').innerHTML = `L foot ${legState(pet.legs[0])}<br>R foot ${legState(pet.legs[1])}<br>` +
+    `${Math.abs(v.x).toFixed(1)} vox/s · ${(pet.steps.length / 2).toFixed(1)} steps/s`;
+}
+
+// ---------------- loop ----------------
+let acc = 0, last = performance.now(), statusT = 0;
+function frame(now) {
+  tick(clamp((now - last) / 1000, 0, 0.05)); last = now;
+  renderer.render(scene, cam);
+  requestAnimationFrame(frame);
+}
+function tick(dt) {
+  acc += dt;
+  while (acc >= STEP) { pet.think(STEP); pet.step(STEP); world.step(); acc -= STEP; }
+  pet.update(dt);
+  for (let i = dust.length - 1; i >= 0; i--) {
+    const d = dust[i]; d.t += dt; d.vy -= 20 * dt;
+    d.m.position.x += d.vx * dt; d.m.position.y += d.vy * dt;
+    d.m.scale.setScalar(Math.max(0.01, 0.7 * (1 - d.t / d.life)));
+    if (d.t > d.life) { scene.remove(d.m); dust.splice(i, 1); }
+  }
+  if ((statusT -= dt) <= 0) { statusT = 0.15; status(); }
+}
+requestAnimationFrame(frame);
+window.walkLab = { pet: () => pet, ui, tick, render: () => renderer.render(scene, cam), cam, canvas: renderer.domElement };
+</script>
+</body></html>
