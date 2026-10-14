@@ -1444,6 +1444,7 @@ class Pet {
       .setDensity(S.mass ?? 1).setFriction(0.9).setRestitution(0.05)
       .setCollisionGroups(groups(G.PET, G.WORLD | G.WALL | G.PROP)), this.body);
     this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
+    voiceSize = S.h;
     this.action = null; this.rethink = 0; this.scores = {}; this.cool = {}; this.timer = rand(0.5, 1.5);
     this.asleep = false; this.poseSq = 0; this.speedUp = 1; this.roll = 0;
     this.frozen = false; this.spin = 0; this.leaving = false;  // cutscenes
@@ -2945,6 +2946,7 @@ function stepEffects(dt) {
 // Tiny synthesized blips, no files. In OBS, tick "Control audio via OBS" on the browser source to hear
 // them and set their volume there too.
 let AC = null;
+let voiceSize = 8; // the pet's height, set by the pet itself (it can make sounds before `pet` exists)
 function sfx(kind) {
   if (!CFG.sfx || document.hidden) return;
   try { AC ??= new AudioContext(); } catch (e) { return; }
@@ -2969,7 +2971,7 @@ function sfx(kind) {
     src.connect(f).connect(g).connect(AC.destination);
     src.start(t + at);
   };
-  const pitch = 1.6 - Math.min(0.8, (pet?.S.h ?? 8) / 20); // small critters squeak higher
+  const pitch = 1.6 - Math.min(0.8, voiceSize / 20); // small critters squeak higher
   if (kind === 'hop') tone(220 * pitch, 440 * pitch, 0.12, 'sine', 0, 0.5);
   else if (kind === 'chomp') noise(0.07, 0, 0.9, 900);
   else if (kind === 'chirp') { tone(700 * pitch, 1100 * pitch, 0.08); tone(900 * pitch, 1400 * pitch, 0.1, 'sine', 0.1); }
