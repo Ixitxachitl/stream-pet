@@ -39,6 +39,9 @@
     form      test with a throwaway adult of this form id (see the gallery)
     gallery   1 = show every form on a grid (spoilers!), page=N to flip
     stage     test with a throwaway pet at this stage: egg, baby, child, teen, adult or elder
+    legs/arms test with a throwaway pet whose family has grown legs/arms this far, 0-1 (walks from 0.3,
+              arms from 0.35)
+    detail    test with a throwaway pet built from finer voxels: 1, 2 or 3 (also works with gallery=1)
     reset     1 = start over with a new egg
     agerate   how much faster it grows up (for testing)
     ball      1 = drop a ball in to play with
@@ -53,7 +56,8 @@
   Custom integrations (Streamer.bot, etc.) can call:
     window.pet.chat(name, text), .sub(name, count), .bits(name, amount), .raid(name, viewers), .follow(name),
     .feed(kind), .play(), .stats(), .say(text), .words()
-  and for testing: .hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy'), .evolve(), .save()
+  and for testing: .hop(), .knock(), .drop('ball'), .stage('adult'), .expr('happy'), .evolve(), .save(),
+    .genes(legs, arms, detail)
 -->
 <style>
   html,body{margin:0;padding:0;overflow:hidden;background:transparent}
@@ -288,8 +292,27 @@ const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 // One pet per slot, kept in this browser source's local storage. ?slot= runs a separate pet, ?reset=1
 // starts over. Test runs (?stage= or ?seed= given) build a throwaway pet and never touch the save.
 const SAVE_KEY = 'streampet.v1.' + CFG.slot;
-const TESTING = Q.has('stage') || Q.has('seed') || Q.has('form');
+const TESTING = Q.has('stage') || Q.has('seed') || Q.has('form') || Q.has('legs') || Q.has('arms') || Q.has('detail');
 const TRAITS = ['fed', 'rested', 'playful', 'social', 'hyped', 'calm', 'nightowl', 'generous'];
+
+// Legs and arms run in the family. The first pet hops on stubby feet, as always. Each egg starts from
+// its parent's legs and arms (0..1) and gets a nudge from how the parent lived: playful, hyped parents
+// pass on stronger legs; social, generous ones pass on arms (for waving). A little luck either way, so
+// some families get there sooner than others. Like evolution, nothing on screen shows these.
+// Detail is how finely the pet is built: it rises a quarter every generation, whatever the parents did,
+// and the pet is built from 2× as many voxels across from the third generation, 3× from the seventh.
+const NO_GENES = { legs: 0, arms: 0, detail: 1 };
+function inheritGenes(parent) {
+  const g = parent.genes ?? NO_GENES, T = parent.traits ?? {};
+  const total = TRAITS.reduce((a, k) => a + (T[k] ?? 0), 0);
+  const share = (k) => (total > 0 ? (T[k] ?? 0) / total : 1 / TRAITS.length);
+  const luck = () => (Math.random() - 0.4) * 0.1;
+  return {
+    legs: clamp(g.legs + 0.12 + 0.5 * (share('playful') + 0.5 * share('hyped')) + luck(), 0, 1),
+    arms: clamp(g.arms + 0.05 + 0.6 * (share('social') + share('generous')) + luck(), 0, 1),
+    detail: Math.min(3, (g.detail ?? 1) + 0.25),
+  };
+}
 
 function newSave(seed, parent) {
   return {
@@ -303,6 +326,7 @@ function newSave(seed, parent) {
     events: { chat: 0, chatters: 0, raids: 0, subs: 0, bits: 0 },
     hatchMonth: null, hatchDay: null, hatchHour: null, flags: {}, teen: null, form: null, formName: null,
     lineage: parent ? [...parent.lineage] : [],
+    genes: parent ? inheritGenes(parent) : { ...NO_GENES },
   };
 }
 function loadSave() {
@@ -311,6 +335,7 @@ function loadSave() {
     s.stage = ['egg', 'baby', 'child', 'teen', 'adult', 'elder'].includes(Q.get('stage')) ? Q.get('stage') : 'baby';
     s.name = CFG.name || 'Test';
     s.formId = Q.get('form'); // resolved once the form table exists
+    s.genes = { legs: clamp(+Q.get('legs') || 0, 0, 1), arms: clamp(+Q.get('arms') || 0, 0, 1), detail: clamp(+Q.get('detail') || 1, 1, 3) };
     return s;
   }
   try {
@@ -835,6 +860,141 @@ function motionFor(recipe) {
   };
 }
 
+// What a family's genes look like on a recipe: walking legs (how far below the body they reach) and
+// which arms, if any. Only bodies that stand on their own two feet walk: not floaty ones, not
+// caterpillars. Arms bud at 35% and get longer and floppier from there.
+const WALK_FEET = { stubby: 1, paws: 1, long: 3 };  // each foot type's own height
+const ARM_STAGES = [[0.8, 'noodle'], [0.55, 'dangly'], [0.35, 'stubby']];
+function bodyPlan(recipe, genes = NO_GENES) {
+  const detail = clamp(Math.round(genes.detail ?? 1), 1, 3);
+  if (recipe.body.type === 'egg') return { detail };
+  const ft = recipe.feet?.type, walks = genes.legs >= 0.3 && ft in WALK_FEET && !BODIES[recipe.body.type]?.hover;
+  return { legLen: walks ? WALK_FEET[ft] + 3 * genes.legs : 0, arms: ARM_STAGES.find(([t]) => genes.arms >= t)?.[1], detail };
+}
+
+// ---- finer voxels ----
+// A model at k× the resolution (the same size once its mesh is scaled by 1/k), with corners and edges
+// rounded off: a fine voxel is solid where the model, blurred, is at least half solid. A voxel with at
+// most one solid neighbour (a tip, a lone pixel) is kept whole so small details don't vanish. Fine voxels
+// take the colour of the coarse voxel they're in, or else of the nearest solid one. With round off, each
+// voxel is just split into k×k×k.
+const FACE_DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+function refineVox(vox, k, round = true) {
+  if (k <= 1) return vox;
+  const out = new Vox(), [mn, mx] = vox.bounds(), lone = new Map();
+  if (!round) {
+    for (const [x, y, z, c] of vox.each()) for (let i = 0; i < k; i++) for (let j = 0; j < k; j++) for (let l = 0; l < k; l++) out.set(x * k + i, y * k + j, z * k + l, c);
+    return out;
+  }
+  const isLone = (x, y, z) => {
+    const key = Vox.key(x, y, z);
+    if (!lone.has(key)) lone.set(key, FACE_DIRS.filter(([a, b, c]) => vox.has(x + a, y + b, z + c)).length <= 1);
+    return lone.get(key);
+  };
+  for (let X = (mn[0] - 1) * k; X < (mx[0] + 2) * k; X++)
+    for (let Y = (mn[1] - 1) * k; Y < (mx[1] + 2) * k; Y++)
+      for (let Z = (mn[2] - 1) * k; Z < (mx[2] + 2) * k; Z++) {
+        const cx = (X + 0.5) / k, cy = (Y + 0.5) / k, cz = (Z + 0.5) / k;
+        const px = Math.floor(cx), py = Math.floor(cy), pz = Math.floor(cz), own = vox.get(px, py, pz);
+        if (own !== undefined && isLone(px, py, pz)) { out.set(X, Y, Z, own); continue; }
+        const ix = Math.floor(cx - 0.5), iy = Math.floor(cy - 0.5), iz = Math.floor(cz - 0.5);
+        const tx = cx - 0.5 - ix, ty = cy - 0.5 - iy, tz = cz - 0.5 - iz;
+        let occ = 0, best = own, bw = -1;
+        for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let c = 0; c < 2; c++) {
+          const col = vox.get(ix + a, iy + b, iz + c);
+          if (col === undefined) continue;
+          const w = (a ? tx : 1 - tx) * (b ? ty : 1 - ty) * (c ? tz : 1 - tz);
+          occ += w;
+          if (own === undefined && w > bw) { bw = w; best = col; }
+        }
+        if (occ >= 0.5) out.set(X, Y, Z, best);
+      }
+  return out;
+}
+function detailMesh(vox, k, opts, round = true) {
+  if (k <= 1) return voxMesh(vox, opts);
+  const m = voxMesh(refineVox(vox, k, round), opts);
+  m.scale.setScalar(1 / k);
+  return m;
+}
+// The body at k× the resolution: the same shape and paint, sampled finer, so patterns and the belly come
+// out finer too. Whatever was painted on the coarse body afterwards (cheeks, mouth) is carried over onto
+// the fine front surface. Fine voxel X sits in coarse voxel floor(X / k).
+function fineBody(coarse, unpainted, w, h, d, paint, shape, k) {
+  const W = w * k, D = d * k, raw = blob(W, h * k, D, paint, shape), fine = new Vox();
+  const sx = Math.floor(W / 2) - Math.floor(w / 2) * k, sz = Math.floor(D / 2) - Math.floor(d / 2) * k;
+  for (const [x, y, z, c] of raw.each()) fine.set(x + sx, y, z + sz, c);
+  for (const [key, c] of coarse.m) {
+    if (unpainted.get(key) === c) continue;
+    const x = Math.floor(key / 1048576) - 512, y = Math.floor(key / 1024) % 1024 - 512;
+    for (let i = 0; i < k; i++) for (let j = 0; j < k; j++) {
+      const fz = fine.frontAt(x * k + i, y * k + j);
+      if (fz !== null) fine.set(x * k + i, y * k + j, fz, c);
+    }
+  }
+  return fine;
+}
+const GALLERY_DETAIL = clamp(Math.round(+Q.get('detail') || 1), 1, 3);
+
+// Walking legs sit where the recipe's own feet would, in the same colours. size is the foot box:
+// across, tall, front to back.
+function legSpec(type, S, pal) {
+  if (type === 'long') {
+    const F = Math.max(1, Math.round(S.w * 0.25));
+    return { hipX: S.w / 2 - F - 0.5, thick: 1, leg: pal.dark, foot: pal.accent, size: [1.3, 1, 2] };
+  }
+  if (type === 'paws') {
+    const F = Math.max(0, Math.round(S.w * 0.14));
+    return { hipX: Math.max(1, S.w / 2 - F - 1.5), thick: 1.5, leg: pal.dark, foot: pal.dark, size: [3, 1, 2] };
+  }
+  const fw = S.w >= 9 ? 2 : 1, F = Math.max(0, Math.round(S.w * 0.18));
+  return { hipX: Math.max(1, S.w / 2 - F - fw / 2), thick: fw === 2 ? 1.7 : 1.25, leg: pal.dark,
+    foot: pal.pattern === 'socks' ? pal.accent : pal.dark, size: [fw + 0.3, 1, 2] };
+}
+// Arms hang from the shoulders as a chain of n segments, scaled to the body.
+const ARM_STYLES = {
+  stubby: { n: 1, len: 1.8, thick: 1.3, hand: 1.5 },
+  dangly: { n: 2, len: 1.8, thick: 1, hand: 1.4 },
+  noodle: { n: 4, len: 1.5, thick: 0.9, hand: 1.3 },
+};
+// Legs and arms are plain boxes, posed every frame in world space (see Pet.updateLimbs).
+const LIMB_BOX = new THREE.BoxGeometry(1, 1, 1), LIMB_FRONT = new THREE.Vector3(0, 0, 1), LV = Array.from({ length: 10 }, () => new THREE.Vector3());
+const limbBasis = new THREE.Matrix4(), limbX = new THREE.Vector3(), limbZ = new THREE.Vector3(), limbDir = new THREE.Vector3();
+// Point a box along dir without letting it spin about its own length: one face always looks the way the
+// pet faces (LIMB_FRONT), so limbs tilt as they swing but never twist.
+function limbOrient(mesh, dir) {
+  limbX.crossVectors(dir, LIMB_FRONT);
+  if (limbX.lengthSq() < 1e-6) limbX.set(1, 0, 0);
+  limbX.normalize();
+  limbZ.crossVectors(limbX, dir);
+  mesh.quaternion.setFromRotationMatrix(limbBasis.makeBasis(limbX, dir, limbZ));
+}
+// A box from a to b, run on past a by extA and past b by extB.
+function limbSeg(mesh, a, b, thick, extA = 0, extB = 0) {
+  const len = a.distanceTo(b);
+  limbDir.subVectors(b, a).normalize();
+  mesh.position.addVectors(a, b).multiplyScalar(0.5).addScaledVector(limbDir, (extB - extA) / 2);
+  limbOrient(mesh, limbDir);
+  mesh.scale.set(thick, len + extA + extB, thick);
+}
+function buildLimbs(S, pal, legs, armStyle) {
+  const group = new THREE.Group(), mat = (c) => new THREE.MeshLambertMaterial({ color: c });
+  const box = (m) => { const b = new THREE.Mesh(LIMB_BOX, m); group.add(b); return b; };
+  const out = { group, legs: null, arms: null };
+  if (legs) {
+    const lm = mat(legs.leg), fm = mat(legs.foot);
+    out.legs = [-1, 1].map(side => ({ side, thigh: box(lm), shin: box(lm), knee: box(lm), foot: box(fm) }));
+  }
+  if (armStyle) {
+    const k = clamp(S.h / 8, 0.75, 1.3), A0 = ARM_STYLES[armStyle];
+    const A = { ...A0, len: A0.len * k, hand: A0.hand * Math.sqrt(k) };
+    const am = mat(new THREE.Color(pal.body).multiplyScalar(0.85)), hm = mat(pal.belly);
+    out.arms = [-1, 1].map(side => ({ side, A, pts: null,
+      segs: Array.from({ length: A.n }, () => box(am)), joints: Array.from({ length: A.n - 1 }, () => box(am)), hand: box(hm) }));
+  }
+  return out;
+}
+
 // An egg: round slices, widest a bit below the middle, with spots.
 function eggVox(S, pal) {
   const vox = new Vox(), r = rngFrom(pal.patternSeed);
@@ -852,7 +1012,7 @@ function eggVox(S, pal) {
   return vox;
 }
 
-function buildCritter(recipe, pal) {
+function buildCritter(recipe, pal, plan = {}) {
   const RB = recipe.body;
   const S = { w: RB.w, h: RB.h, d: RB.d, foot: 0, egg: RB.type === 'egg', ...motionFor(recipe) };
   const root = new THREE.Group();   // follows the physics body; origin at the feet
@@ -863,8 +1023,9 @@ function buildCritter(recipe, pal) {
     for (const e of parts.eyes) for (const [k, m] of Object.entries(e.m)) m.visible = k === (name in e.m ? name : 'open');
   };
 
+  const K = plan.detail ?? GALLERY_DETAIL;  // how many fine voxels across each coarse one
   if (S.egg) {
-    squash.add(voxMesh(eggVox(S, pal)));
+    squash.add(detailMesh(eggVox(S, pal), K));
     return parts;
   }
 
@@ -873,19 +1034,26 @@ function buildCritter(recipe, pal) {
   const x0 = -Math.floor(S.w / 2), z0 = -Math.floor(S.d / 2);
   const col = (i) => x0 + i, mirror = (i) => S.w - 1 - i;
   const bellyPaint = (nx, ny, nz) => (nz > 0.3 && ny < 0.25 && Math.abs(nx) < 0.62 ? pal.belly : pal.body);
-  const body = blob(S.w, S.h, S.d, patternPainter(pal, bellyPaint), BODIES[RB.type] ?? BODIES.round);
+  const paint = patternPainter(pal, bellyPaint), shape = BODIES[RB.type] ?? BODIES.round;
+  const body = blob(S.w, S.h, S.d, paint, shape), unpainted = new Map(body.m);
 
-  const feet = FEET[recipe.feet?.type ?? 'none']?.(S, pal, col, mirror);
-  S.foot = feet ? feet.h : 0;
+  // A family that has grown walking legs gets those instead of the recipe's feet. S.foot is then how far
+  // below the body they reach.
+  S.legs = plan.legLen ? legSpec(recipe.feet.type, S, pal) : null;
+  S.legLen = plan.legLen ?? 0;
+  const feet = S.legs ? null : FEET[recipe.feet?.type ?? 'none']?.(S, pal, col, mirror);
+  S.foot = S.legs ? S.legLen : feet ? feet.h : 0;
   if (S.hover) S.foot = 0;
   if (feet) {
-    const m = voxMesh(feet.vox, { layer: LAYER.part });
+    const m = detailMesh(feet.vox, K, { layer: LAYER.part });
     m.position.set(S.w % 2 ? -0.5 : 0, 0, S.d % 2 ? -0.5 : 0);
     squash.add(m);
   }
 
+  // with walking legs (drawn separately) the body squashes from its own bottom, not from the floor
   const bodyGroup = new THREE.Group();
-  bodyGroup.position.set(S.w % 2 ? -0.5 : 0, S.foot, S.d % 2 ? -0.5 : 0);
+  if (S.legs) squash.position.y = S.foot;
+  bodyGroup.position.set(S.w % 2 ? -0.5 : 0, S.legs ? 0 : S.foot, S.d % 2 ? -0.5 : 0);
   squash.add(bodyGroup);
 
   // face
@@ -906,7 +1074,8 @@ function buildCritter(recipe, pal) {
       if (!E[ex2]) continue;
       let rows = E[ex2];
       if (side < 0 && E.mirrored.includes(ex2)) rows = rows.map(r => [...r].reverse().join(''));
-      m[ex2] = voxMesh(flat(rows, eyeMap), { layer: LAYER.face });
+      // eyes only round off from 3×: at 2× a small eye just looks notched
+      m[ex2] = detailMesh(flat(rows, eyeMap), K, { layer: LAYER.face }, K >= 3);
       m[ex2].position.x = (E.w - rows[0].length) / 2; // drawings wider than the eye stay centred on it
       m[ex2].visible = ex2 === 'open';
       g.add(m[ex2]);
@@ -914,7 +1083,7 @@ function buildCritter(recipe, pal) {
     g.position.set(ex, eyeY, fz + 0.75);
     g.scale.z = 0.5;
     bodyGroup.add(g);
-    parts.eyes.push({ g, m });
+    parts.eyes.push({ g, m, ex });
   }
   const M = MOUTHS[recipe.mouth] ?? MOUTHS.dot;
   const cL = Math.floor((S.w - 1) / 2), cR = Math.ceil((S.w - 1) / 2);
@@ -926,7 +1095,17 @@ function buildCritter(recipe, pal) {
       }
     }
   }
-  bodyGroup.add(voxMesh(body));
+  if (K > 1) {
+    const fine = fineBody(body, unpainted, S.w, S.h, S.d, paint, shape, K), m = voxMesh(fine);
+    m.scale.setScalar(1 / K);
+    bodyGroup.add(m);
+    // sit the eyes on the fine surface, which is a little in front of or behind the coarse one
+    for (const e of parts.eyes) {
+      let fz = -99;
+      for (let X = e.ex * K; X < (e.ex + E.w) * K; X++) for (let Y = eyeY * K; Y < (eyeY + E.h) * K; Y++) fz = Math.max(fz, fine.frontAt(X, Y) ?? -99);
+      if (fz > -99) e.g.position.z = (fz + 1) / K - 0.25;
+    }
+  } else bodyGroup.add(voxMesh(body));
 
   // everything else plugs into the body
   const k = { S, pal, body, col, mirror, x0, z0, cx: x0 + S.w / 2, zm: Math.floor(z0 + S.d / 2) };
@@ -942,12 +1121,13 @@ function buildCritter(recipe, pal) {
   for (const a of attachments) {
     const g = new THREE.Group();
     g.position.set(...a.at);
-    const m = voxMesh(a.vox, { layer: LAYER.part });
+    const m = detailMesh(a.vox, K, { layer: LAYER.part });
     m.position.set(-a.origin[0], -a.origin[1], -a.origin[2]);
     g.add(m);
     bodyGroup.add(g);
     if (a.motion !== 'none') parts.anim.push({ g, motion: a.motion, side: a.side, a: 0, v: 0, ph: Math.random() * 6 });
   }
+  if (S.legs || plan.arms) parts.limbs = buildLimbs(S, pal, S.legs, plan.arms);
   return parts;
 }
 
@@ -1428,21 +1608,29 @@ class Pet {
 
   build(recipe, label, x, y) {
     if (this.vis) scene.remove(this.vis.root);
+    if (this.vis?.limbs) scene.remove(this.vis.limbs.group);
     if (this.body) world.removeRigidBody(this.body);
     this.recipe = recipe; this.stage = label;
-    this.vis = buildCritter(recipe, pal);
+    this.vis = buildCritter(recipe, pal, bodyPlan(recipe, save.genes));
     scene.add(this.vis.root);
+    if (this.vis.limbs) scene.add(this.vis.limbs.group);
     this.shadow ??= blobShadow();
     const S = this.S = this.vis.S;
     this.hx = S.w / 2; this.hy = (S.h + S.foot) / 2; this.hz = S.d / 2;
-    const r = Math.min(this.hx, this.hy, this.hz) * 0.45;
+    // Walking legs are springs, not part of the collider: the box is just the body, up where the legs
+    // hold it. The body's origin stays the middle of the whole thing, legs included, like everyone else.
+    const chy = S.legs ? S.h / 2 : this.hy, r = Math.min(this.hx, chy, this.hz) * 0.45;
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
       // y = null: standing on the floor (or hovering, for floaty bodies)
       .setTranslation(x, y ?? this.hy + 0.02 + (S.hover ? HOVER : 0), 0).enabledTranslations(true, true, false).enabledRotations(false, false, true)
       .setAngularDamping(1.5).setCcdEnabled(true));
-    world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, this.hy - r, this.hz - r, r)
+    world.createCollider(RAPIER.ColliderDesc.roundCuboid(this.hx - r, chy - r, this.hz - r, r)
+      .setTranslation(0, S.legs ? S.foot / 2 : 0, 0)
       .setDensity(S.mass ?? 1).setFriction(0.9).setRestitution(0.05)
       .setCollisionGroups(groups(G.PET, G.WORLD | G.WALL | G.PROP)), this.body);
+    // walking: each foot is planted on the ground or swinging to its next spot
+    this.feet = S.legs ? [-1, 1].map(side => ({ side, planted: true, swinging: false, t: 0, x: x + side * S.legs.hipX, y: 0, from: null, tx: 0 })) : null;
+    this.air = false; this.vd = 0; this.wantVd = false;
     this.inertia = this.body.mass() * (S.w * S.w + S.h * S.h) / 12;
     voiceSize = S.h;
     this.action = null; this.rethink = 0; this.scores = {}; this.cool = {}; this.timer = rand(0.5, 1.5);
@@ -1523,14 +1711,18 @@ class Pet {
     // stay upright
     b.resetTorques(false);
     if (this.dazed <= 0) {
-      const kp = S.upright, kd = 2 * Math.sqrt(kp) * 0.75;
-      b.addTorque({ x: 0, y: 0, z: this.inertia * (-kp * roll - kd * b.angvel().z) }, true);
+      // walkers lean a little into where they're going
+      const kp = S.upright, kd = 2 * Math.sqrt(kp) * 0.75, lean = S.legs ? clamp(-v.x * 0.012, -0.2, 0.2) : 0;
+      b.addTorque({ x: 0, y: 0, z: this.inertia * (-kp * (roll - lean) - kd * b.angvel().z) }, true);
     }
 
     if (S.egg) return this.eggStep(dt);
 
     this.roll = roll;
+    this.wantVd = false;
     if (!this.frozen) brainStep(this, dt);
+    if (!this.wantVd) this.vd = 0;  // nothing asked it to walk this step: stop
+    if (this.feet) this.legStep(dt);  // (this.feet, not S: the brain may have just rebuilt it as an egg)
     if (this.moodT > 0 && (this.moodT -= dt) <= 0) this.expr = 'open';
   }
 
@@ -1540,13 +1732,15 @@ class Pet {
     b.applyImpulse({ x: lean * m * 6 * power, y: m * this.S.hopV * 0.7 * power, z: 0 }, true);
     b.applyTorqueImpulse({ x: 0, y: 0, z: -roll * this.inertia * 5 * power }, true);
     this.sqV += 2;
+    if (this.feet) this.takeOff();
   }
 
   // show an expression for a while
   mood(expr, secs) { this.expr = expr; this.moodT = secs; }
 
-  // Hop toward x. Returns true once within `near` of it.
+  // Hop toward x (or walk, for a family that has grown legs). Returns true once within `near` of it.
   hopToward(x, near, dt) {
+    if (this.feet) return this.walkToward(x, near);
     const S = this.S, b = this.body, p = this.pos(), v = b.linvel();
     const dx = x - p.x, dist = Math.abs(dx);
     if (dist <= near) { this.crouch = 0; return true; }
@@ -1566,6 +1760,215 @@ class Pet {
       }
     }
     return false;
+  }
+
+  walkToward(x, near) {
+    const dx = x - this.pos().x, dist = Math.abs(dx);
+    this.wantVd = true;
+    if (dist <= near) { this.vd = 0; return true; }
+    if (dist > 0.5) this.face(Math.sign(dx));
+    this.vd = Math.sign(dx) * this.gait().speed * clamp(dist / 5, 0.3, 1);
+    return false;
+  }
+
+  // ---- walking ----
+  // A point on the body, relative to the bottom middle of the body itself (above the legs), in the world.
+  bodyPoint(lx, ly, lz, out = { x: 0, y: 0, z: 0 }) {
+    const p = this.pos(), c = Math.cos(this.roll), s = Math.sin(this.roll), y = ly - this.hy + this.S.foot;
+    out.x = p.x + lx * c - y * s; out.y = p.y + lx * s + y * c; out.z = lz;
+    return out;
+  }
+  // Hips are a little up inside the body, turned with it toward where it's going.
+  hip(side, out) {
+    const h = side * this.S.legs.hipX;
+    return this.bodyPoint(h * Math.cos(this.yaw), 0.6, -h * Math.sin(this.yaw), out);
+  }
+  groundAt(x, fromY) {
+    DOWN.origin = { x, y: fromY, z: 0 };
+    const hit = world.castRay(DOWN, 60, true, undefined, groups(G.PET, G.WORLD | G.PROP), undefined, this.body);
+    return hit ? fromY - hit.timeOfImpact : -5;
+  }
+  // How long a step takes and how far a foot reaches, from the leg length (and zoomies). The walking
+  // speed follows, so short legs patter and long legs stride.
+  gait() {
+    const L = this.S.legLen, pace = this.speedUp;
+    const swingT = (0.09 + 0.035 * L) / Math.sqrt(pace), reach = (0.4 + 0.2 * pace) * L + 0.45;
+    return { swingT, reach, speed: 0.7 * reach / swingT };
+  }
+  takeOff() { this.air = true; for (const f of this.feet) { f.planted = false; f.swinging = false; } }
+
+  // Each standing leg is a springy strut holding its hip up, at the height a straight leg would reach
+  // over that foot: the body rises over a foot and dips between steps. With one foot down the push is
+  // off-centre, so it waddles. Each foot aims a little ahead of its hip, further when moving faster than
+  // it wants to, which is what catches it after a shove.
+  legStep(dt) {
+    const b = this.body, p = this.pos(), v = b.linvel(), w = b.angvel().z, m = b.mass(), S = this.S;
+    const legReach = S.legLen + 0.6, { swingT, reach } = this.gait();
+    const H = this.feet.map(f => this.hip(f.side));
+    const xm = (H[0].x + H[1].x) / 2, ym = (H[0].y + H[1].y) / 2, hipH = ym - this.groundAt(xm, ym + 0.5);
+    if (this.dazed > 0 && !this.air) this.takeOff();
+    if (!this.air && hipH > legReach * 1.25) this.takeOff();
+    if (this.air && this.dazed <= 0 && v.y <= 1 && hipH <= legReach) {  // landing
+      this.air = false;
+      for (const [i, f] of this.feet.entries()) {
+        f.x = clamp(f.x, H[i].x - reach, H[i].x + reach); f.y = this.groundAt(f.x, H[i].y + 0.5);
+        f.planted = true; f.swinging = false;
+      }
+    }
+    if (this.air || this.dazed > 0) {
+      // legs dangle from the hips, trailing the motion a little
+      const s = Math.sin(this.roll), c = Math.cos(this.roll), len = legReach * 0.9, k = Math.min(1, dt * 18);
+      for (const [i, f] of this.feet.entries()) {
+        f.x += (H[i].x + len * s - v.x * 0.01 - f.x) * k;
+        f.y += (H[i].y - len * c - v.y * 0.006 - f.y) * k;
+        f.y = Math.max(f.y, this.groundAt(f.x, H[i].y + 0.5));
+      }
+      return;
+    }
+    for (const [i, f] of this.feet.entries()) {
+      f.tx = clamp(H[i].x + v.x * swingT * 0.6 + 0.04 * (v.x - this.vd), H[i].x - reach, H[i].x + reach);
+      if (!f.planted && !f.swinging) { f.swinging = true; f.t = 0; f.from = { x: f.x, y: f.y }; } // lost its footing
+    }
+    // one foot at a time: the one furthest from where it should be. Sitting (asleep, squatting) it only
+    // shuffles a foot that's been pulled out from under it.
+    const sit = this.asleep || this.poseSq < -0.2;
+    const order = [...this.feet].sort((a, c) => Math.abs(c.x - c.tx) - Math.abs(a.x - a.tx));
+    for (const f of order) {
+      const o = this.feet.find(g => g !== f), Hf = H[this.feet.indexOf(f)];
+      const stretched = Math.hypot(Hf.x - f.x, Hf.y - f.y) > legReach * 1.06;
+      if (f.planted && !f.swinging && o.planted && !o.swinging && ((!sit && Math.abs(f.x - f.tx) > 0.3 * reach + 0.15) || stretched)) {
+        f.swinging = true; f.t = 0; f.from = { x: f.x, y: f.y };
+        break;
+      }
+    }
+    for (const [i, f] of this.feet.entries()) {
+      if (!f.swinging) continue;
+      f.t += dt / swingT;
+      const gy = this.groundAt(f.tx, H[i].y + 0.5), t = Math.min(1, f.t), e = t * t * (3 - 2 * t);
+      f.x = f.from.x + (f.tx - f.from.x) * e;
+      f.y = Math.max(f.from.y + (gy - f.from.y) * t + (0.25 * S.legLen + 0.45) * Math.sin(Math.PI * t), this.groundAt(f.x, H[i].y + 0.5));
+      if (f.t >= 1) {
+        f.swinging = false; f.planted = true; f.x = f.tx; f.y = gy;
+        this.sqV -= 0.35;
+        if (Math.abs(v.x) > 4) spawnBits(f.x, gy + 0.3, [0xe9dcc0], 1, { vx: -Math.sign(v.x) * 3, vy: 4, spread: 3, size: 0.35, life: 0.4 });
+      }
+    }
+    // support; sitting down folds the legs
+    const stance = this.feet.filter(f => f.planted && !f.swinging);
+    const kp = 300, kd = 28, Lr = legReach * 0.94 * (sit ? 0.55 : 1);
+    let Fy = 0, sx = 0, sy = 0, n = 0;
+    for (const f of stance) {
+      const Hf = H[this.feet.indexOf(f)], dx = Hf.x - f.x, hCur = Hf.y - f.y;
+      if (Math.hypot(dx, hCur) > legReach * 1.15) { f.planted = false; continue; } // left behind
+      const hT = Math.sqrt(Math.max(0.3 * Lr * Lr, Lr * Lr - dx * dx)), vy = v.y + w * (Hf.x - p.x);
+      const a = clamp(GRAVITY / stance.length + (kp * (hT - hCur) - kd * vy) / stance.length, 0, GRAVITY * 4);
+      // pushing from part way out toward the hip is what rocks it side to side
+      b.applyImpulseAtPoint({ x: 0, y: m * a * dt, z: 0 }, { x: p.x + (Hf.x - p.x) * 0.6, y: Hf.y, z: 0 }, true);
+      Fy += m * a; sx += f.x; sy += f.y; n++;
+    }
+    if (n) {
+      // Push toward the wanted speed, plus gravity tipping the body over its feet, which the next step
+      // catches; all limited by grip. Sitting doesn't step, so it settles back over its feet instead.
+      sx /= n; sy /= n;
+      let ax = 10 * (this.vd - v.x) + (sit ? -20 * (p.x - sx) : 0.5 * GRAVITY * (p.x - sx) / Math.max(1, ym + S.h / 2 - sy));
+      ax = clamp(ax, -1.2 * Fy / m, 1.2 * Fy / m);
+      b.applyImpulse({ x: m * ax * dt, y: 0, z: 0 }, true);
+    }
+  }
+
+  // ---- limbs, drawn ----
+  // Legs and arms are boxes posed in world space. Their group takes the pop-in growth and the sink into
+  // the bed from the body, so they stay attached.
+  updateLimbs(dt) {
+    const V = this.vis, Lm = V.limbs, S = this.S, rp = V.root.position, k = V.root.scale.x, sink = this.sink ?? 0;
+    Lm.group.position.set(rp.x * (1 - k), (rp.y + sink) * (1 - k) - sink, rp.z * (1 - k));
+    Lm.group.scale.setScalar(k);
+    LIMB_FRONT.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    if (Lm.legs) this.poseLegs(Lm.legs);
+    if (Lm.arms) this.poseArms(Lm.arms, dt);
+  }
+
+  // two-bone legs from hip to ankle, knees bending toward where it faces
+  poseLegs(legs) {
+    const S = this.S, footH = S.legs.size[1], segLen = Math.max(0.4, S.legLen + 0.6 - footH);
+    for (const [i, l] of legs.entries()) {
+      const f = this.feet[i], H = this.hip(l.side), hip = LV[0].set(H.x, H.y, H.z);
+      const ankle = LV[1].set(f.x, f.y + footH, H.z);
+      const full = hip.distanceTo(ankle), d = Math.min(full, segLen * 0.999);
+      const dir = LV[2].subVectors(ankle, hip).normalize();
+      ankle.copy(hip).addScaledVector(dir, Math.min(full, segLen + 0.4));
+      // The thigh runs up into the body and the shin down into the foot, where the overlap is hidden.
+      // At the knee both stop exactly at the joint, and one block turned halfway between them fills the gap.
+      if (S.legLen < 1.6) {
+        limbSeg(l.thigh, hip, ankle, S.legs.thick, 0.5, 0.3); l.shin.visible = l.knee.visible = false;
+      } else {
+        const bend = LV[3].copy(LIMB_FRONT).addScaledVector(dir, -LIMB_FRONT.dot(dir)).normalize();
+        const knee = LV[4].copy(hip).addScaledVector(dir, d / 2).addScaledVector(bend, Math.sqrt(Math.max(0, (segLen / 2) ** 2 - (d / 2) ** 2)));
+        limbSeg(l.thigh, hip, knee, S.legs.thick, 0.5, 0); limbSeg(l.shin, knee, ankle, S.legs.thick, 0, 0.3);
+        const mid = LV[5].subVectors(knee, hip).normalize().add(LV[6].subVectors(ankle, knee).normalize());
+        l.knee.position.copy(knee);
+        limbOrient(l.knee, mid.lengthSq() > 1e-6 ? mid.normalize() : dir);
+        l.knee.scale.setScalar(S.legs.thick);
+        l.shin.visible = l.knee.visible = true;
+      }
+      l.foot.scale.set(...S.legs.size);
+      l.foot.position.set(ankle.x, ankle.y - footH / 2, ankle.z).addScaledVector(LIMB_FRONT, 0.4);
+      l.foot.rotation.set(0, this.yaw, 0);
+    }
+  }
+
+  // Each arm is a chain of points hanging from its shoulder (verlet: a point's velocity is how far it
+  // moved last step), so it trails behind the body and flops about when the body jolts. Walking, each
+  // arm swings a little with the opposite leg.
+  poseArms(arms, dt) {
+    const S = this.S, c = Math.cos(this.roll), s = Math.sin(this.roll);
+    const sil = Math.hypot(this.hx * Math.cos(this.yaw), this.hz * Math.sin(this.yaw)); // half-width as seen
+    const pad = arms[0].A.thick / 2 + 0.1, rx = sil + pad, ry = S.h / 2 + pad;
+    const mid = this.bodyPoint(0, S.h / 2, 0), walking = this.feet && !this.air && this.dazed <= 0 && Math.abs(this.vd) > 0.1;
+    for (const arm of arms) {
+      const { A } = arm, root = this.bodyPoint(arm.side * sil * Math.sqrt(1 - 0.15 ** 2), S.h * 0.425, -arm.side * this.hx * Math.sin(this.yaw));
+      if (!arm.pts) arm.pts = Array.from({ length: A.n + 1 }, (_, i) => ({ x: root.x, y: root.y - i * A.len, px: root.x, py: root.y - i * A.len }));
+      const pts = arm.pts, end = pts[A.n], floor = this.groundAt(root.x, root.y) + 0.5;
+      let swing = 0;
+      if (walking) { const f = this.feet.find(g => g.side === -arm.side), H = this.hip(f.side); swing = clamp(f.x - H.x, -2.5, 2.5) * 0.9; }
+      for (let n = Math.max(1, Math.ceil(dt / (1 / 120))), h = dt / n; n > 0; n--) {
+        pts[0].x = root.x; pts[0].y = root.y;
+        for (let i = 1; i <= A.n; i++) {
+          const q = pts[i], vx = (q.x - q.px) * 0.985, vy = (q.y - q.py) * 0.985;
+          q.px = q.x; q.py = q.y;
+          q.x += vx; q.y += vy - GRAVITY * h * h;
+        }
+        if (walking) end.x += (root.x + swing - end.x) * 0.006;  // a nudge, never more than gravity
+        for (let it = 0; it < 4; it++) {
+          for (let i = 1; i <= A.n; i++) {
+            const a = pts[i - 1], b = pts[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1e-6, k = (d - A.len) / d;
+            if (i === 1) { b.x -= dx * k; b.y -= dy * k; }
+            else { a.x += dx * k / 2; a.y += dy * k / 2; b.x -= dx * k / 2; b.y -= dy * k / 2; }
+          }
+          for (let i = 1; i <= A.n; i++) {
+            // inside the body: slide it sideways out to the edge at that height, so it hangs down the flank
+            const q = pts[i], ox = q.x - mid.x, oy = q.y - mid.y, lx = ox * c + oy * s, ly = -ox * s + oy * c;
+            if (Math.abs(ly) < ry && (lx / rx) ** 2 + (ly / ry) ** 2 < 1) {
+              const nx = (Math.sign(lx) || arm.side) * rx * Math.sqrt(1 - (ly / ry) ** 2);
+              q.x = mid.x + nx * c - ly * s; q.y = mid.y + nx * s + ly * c;
+            }
+            if (q.y < floor) { q.y = floor; q.px += (q.x - q.px) * 0.5; }
+          }
+        }
+      }
+      const P = pts.map((q, i) => LV[i].set(q.x, q.y, root.z));
+      for (let i = 0; i < A.n; i++) limbSeg(arm.segs[i], P[i], P[i + 1], A.thick, i === 0 ? 0.6 : 0, 0);
+      for (let i = 0; i < A.n - 1; i++) {
+        const m2 = LV[8].subVectors(P[i + 1], P[i]).normalize().add(LV[9].subVectors(P[i + 2], P[i + 1]).normalize());
+        arm.joints[i].position.copy(P[i + 1]);
+        limbOrient(arm.joints[i], m2.lengthSq() > 1e-6 ? m2.normalize() : LV[9]);
+        arm.joints[i].scale.setScalar(A.thick);
+      }
+      const last = LV[8].subVectors(P[A.n], P[A.n - 1]).normalize();
+      arm.hand.position.copy(P[A.n]).addScaledVector(last, A.hand * 0.35);
+      limbOrient(arm.hand, last);
+      arm.hand.scale.setScalar(A.hand);
+    }
   }
 
   eggStep(dt) {
@@ -1638,6 +2041,8 @@ class Pet {
         e.g.scale.x = Math.abs(e.flip) < 0.05 ? 0.05 * Math.sign(e.flip || 1) : e.flip;
       }
     }
+
+    if (V.limbs) this.updateLimbs(dt);
 
     // blink
     this.blink -= dt;
@@ -3103,7 +3508,8 @@ function frame(now) {
     const p = pet.pos();
     hud.textContent = `fps ${fps.toFixed(0)}\n` +
       `${save.name ?? '(egg)'}  gen ${save.gen}  ${save.stage}  age ${ageHours().toFixed(2)}h  form ${save.formName ?? '-'}  seed ${save.seed}  pattern ${pal.pattern}${TESTING ? '  (test, not saved)' : ''}\n` +
-      `action ${pet.action?.name}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}  asleep ${pet.asleep}\n` +
+      `action ${pet.action?.name}  grounded ${pet.grounded}  dazed ${pet.dazed > 0}  asleep ${pet.asleep}  ` +
+      `legs ${((save.genes ?? NO_GENES).legs * 100).toFixed(0)}% arms ${((save.genes ?? NO_GENES).arms * 100).toFixed(0)}%${pet.feet ? ' (walks)' : ''}\n` +
       `needs ${Object.entries(N).map(([k, v]) => k + ' ' + v.toFixed(0)).join('  ')}  health ${life.health.toFixed(0)}\n` +
       `wants ${Object.entries(pet.scores).sort((a, b) => b[1] - a[1]).map(([k, v]) => k + ' ' + v.toFixed(2)).join('  ')}\n` +
       `traits ${TRAITS.map(k => k + ' ' + save.traits[k].toFixed(1)).join('  ')}\n` +
@@ -3354,6 +3760,10 @@ window.pet = {
   drop: dropThing,
   stage(s) { if (STAGES[s]) { const p = pet.pos(); pet.build(STAGES[s], s, p.x, p.y + 6); } },
   evolve() { if (NEXT[save.stage] && !cutscene) evolve(NEXT[save.stage]); },
+  genes(legs = 0, arms = 0, detail = 1) {
+    save.genes = { legs: clamp(legs, 0, 1), arms: clamp(arms, 0, 1), detail: clamp(detail, 1, 3) };
+    const p = pet.pos(); pet.build(recipeFor(save.stage), save.stage, p.x, p.y + 2);
+  },
   save: () => JSON.parse(JSON.stringify(save)),
   expr(e) { pet.expr = e; },
 };

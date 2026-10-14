@@ -17,7 +17,9 @@ Chat is optional: it makes the pet more sociable and changes how it grows up, bu
 either way. Subs drop cake, bits rain coins and raids bring confetti.
 
 For testing: `debug=1`, `demo=1` (fake chat that doesn't count), `stage=` / `form=` for a throwaway pet,
-`gallery=1` to see every form (spoilers), `speed=` and `agerate=` to fast-forward. The full list is at
+`gallery=1` to see every form (spoilers), `legs=` / `arms=` (0–1) for a pet whose family has grown
+walking legs and arms, `detail=` (1–3) for one built from finer voxels, `speed=` and `agerate=` to
+fast-forward. The full list is at
 the top of [index.html](index.html).
 
 ## Credits

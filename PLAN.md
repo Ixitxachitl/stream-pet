@@ -144,6 +144,18 @@ these ages: egg 5 minutes, baby 2 h, child 6 h, teen 15 h, adult 60 h, and the e
   recipe. `debug=1` is the only way to see the logic, and it's for development only.
 - **No death.** An elder eventually "retires": it lays an egg, waves goodbye and leaves. The new egg
   inherits some palette and traits (a lineage), and a small "family tree" is kept in the save.
+- **Legs and arms run in the family.** The first pet hops on stubby feet. Each egg inherits its parent's
+  leg and arm development (0–1) plus a nudge from how the parent lived (playful/hyped → legs,
+  social/generous → arms) and a little luck. From 30% legs a pet with two feet walks on physics legs
+  instead of hopping (springy struts, stepping feet, a waddle, catch steps when shoved); from 35% arms
+  it grows dangly arms (stubby → dangly → noodle). Floaty bodies and caterpillar feet keep moving as
+  before. Nothing on screen shows the numbers; `?legs=` / `?arms=` try them on a throwaway pet.
+- **Later generations are built finer.** Detail rises a quarter every generation, whatever the parents
+  did: the third generation is built from 2× as many voxels across, the seventh from 3×. The body is
+  rebuilt from its shape and paint at that resolution (finer belly and patterns, the face carried over);
+  every other model (parts, feet, eggs, eye drawings) is split into fine voxels with corners and edges
+  rounded off, keeping lone pixels and tips whole. Eyes only round off from 3×. `?detail=` tries it,
+  also on the gallery.
 
 ## 5a. Evolution: hundreds of adult forms
 
