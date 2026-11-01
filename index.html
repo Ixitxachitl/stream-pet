@@ -18,7 +18,9 @@
     tiktok    TikTok bridge: 1 = TikFinity on this PC, or a ws:// address
     youtube   a live video ID or link (needs ytkey), or a ws:// bridge
     ytkey     YouTube Data API v3 key ytpoll    seconds between YouTube checks (default 6)
-    ignore    extra bot names to ignore, comma separated
+    firsttime 1 = show first-time chatters too (default 0: Twitch flags them, and spam bots usually show up that way)
+    botlist   1 = leave out the ~1k known bots on the public TwitchInsights list (default 1)
+    ignore    names to always leave out, comma separated (default: the usual chat bots)
     cmds      1 = chat can use !pet (hearts), !pet stats and !pet say
     talk      1 = learn words from chat (used by 3+ chatters) and say silly phrases; mods: !pet forget <word>
     neverlearn  words it should never learn, comma separated (on top of a built-in bad-words list)
@@ -215,9 +217,12 @@ const FIELDS = [
   { k: 'youtube', label: 'YouTube live', type: 'text', def: '', ph: 'video ID / link, or ws://…', help: 'A live video ID or link (needs the API key below), or a bridge address.' },
   { k: 'ytkey', label: 'YouTube API key', type: 'password', def: '', help: 'YouTube Data API v3 key from Google Cloud Console.' },
   { k: 'ytpoll', label: 'YouTube check every (s)', type: 'num', def: 6, min: 2, max: 60, step: 1, help: 'Lower = snappier, but uses the daily API quota faster.' },
-  { k: 'ignore', label: 'Ignore these names', type: 'text', def: '', ph: 'mybot, otherbot', help: 'Common bots are ignored already.' },
   { k: 'cmds', label: 'Chat commands', type: 'bool', def: false, help: '!pet sends hearts, !pet stats shows its card.' },
   { k: 'demo', label: 'Demo chat', type: 'bool', def: false, help: 'Fake chatters, for trying it out. Never counts toward how it grows up.' },
+  { sec: 'Filtering' },
+  { k: 'firsttime', label: 'Show first-time chatters', type: 'bool', def: false, help: 'Twitch flags these; spam bots usually show up this way.' },
+  { k: 'botlist', label: 'Hide known bots', type: 'bool', def: true, help: 'Public TwitchInsights list (needs the overlay hosted, not a local file).' },
+  { k: 'ignore', label: 'Always hide these users', type: 'area', def: 'nightbot, streamelements, streamlabs, moobot, fossabot, wizebot, soundalerts, sery_bot, kofistreambot, botrixoficial, commanderroot', help: 'Comma or line separated.' },
   { sec: 'Pet' },
   { k: 'name', label: 'Name', type: 'text', def: '', ph: '(a cute generated one)', help: 'Leave empty to let it have its own.' },
   { k: 'size', label: 'Grown-up size (px)', type: 'num', def: 160, min: 60, max: 400, step: 5, help: 'How tall an adult is on screen. Babies are smaller.' },
@@ -239,6 +244,8 @@ function coerce(f, v) {
   if (f.type === 'select') return f.opts.some(o => o[0] === v) ? v : f.def;
   return String(v ?? '').trim();
 }
+// saved before the bot filters matched the other overlays, "ignore" only held names on top of a built-in bot list
+if (typeof savedSettings.ignore === 'string' && !('botlist' in savedSettings)) savedSettings.ignore = FIELD.ignore.def + ', ' + savedSettings.ignore;
 const fromURL = {};
 for (const f of Object.values(FIELD)) if (Q.has(f.k)) fromURL[f.k] = coerce(f, Q.get(f.k));
 const SET = {};
@@ -2759,15 +2766,29 @@ function showBanner(text) {
 // ---------------- chat and stream events ----------------
 // Everything chat does is passive: it fills the social need, shapes traits, and gets reactions. The
 // pet never needs it. Demo chat (?demo=1) is for show only and never counts toward its traits.
-const BOTS = new Set(['nightbot', 'streamelements', 'streamlabs', 'moobot', 'fossabot', 'soundalerts', 'wizebot',
-  'sery_bot', 'kofistreambot', 'botrixoficial', 'commanderroot', ...CFG.ignore.toLowerCase().split(/[\s,]+/).filter(Boolean)]);
+// ---------------- who's left out ----------------
+// The "ignore" names, plus (with "Hide known bots") the ~1k known bot accounts on the public TwitchInsights
+// list. If that can't be reached (offline, blocked, or the overlay opened as a local file), it's just the names.
+const IGNORE = new Set(CFG.ignore.toLowerCase().split(/[\s,]+/).map(s => s.replace(/^@/, '')).filter(Boolean));
+async function loadBotList() {
+  try {
+    const r = await fetch('https://api.twitchinsights.net/v1/bots/all', { cache: 'no-store' });
+    const j = await r.json();
+    (j.bots || []).forEach(b => { const name = Array.isArray(b) ? b[0] : b; if (name) IGNORE.add(String(name).toLowerCase()); });
+  } catch (e) {
+    console.warn('known-bot list unavailable, using ignore= only', e);
+  }
+  setTimeout(loadBotList, 6 * 3600 * 1000); // refresh every 6 hours
+}
+if (CFG.botlist) loadBotList();
+
 const greets = [];                 // first-time chatters waiting for a wave
 const recentChat = [];             // message times, for spotting hype
 let demoing = false;               // true while demo chat is speaking: it doesn't count
 const counts = () => !demoing;
 
 function onChat({ name, text = '', platform = 'custom', emoteOnly = false, mod = false, first = false }) {
-  if (!name || BOTS.has(String(name).toLowerCase())) return;
+  if (!name || IGNORE.has(String(name).toLowerCase())) return;
   const T = save.traits, now = performance.now();
   N.social = clamp(N.social + 3, 0, 100);
   life.lastChat = save.t;
@@ -2945,7 +2966,8 @@ function connectTwitch(channel) {
       const m = /^(?:@(\S+) )?:([^!\s]+)![^ ]+ PRIVMSG #\S+ :(.*)$/.exec(line);
       if (m) {
         const tags = m[1] ? parseTags(m[1]) : {}, name = tags['display-name'] || m[2];
-        onChat({ name, text: m[3], platform: 'twitch', emoteOnly: tags['emote-only'] === '1',
+        // first-time chatters are left out unless they're asked for (their cheers still count)
+        if (tags['first-msg'] !== '1' || CFG.firsttime) onChat({ name, text: m[3], platform: 'twitch', emoteOnly: tags['emote-only'] === '1',
           mod: /(^|,)(broadcaster|moderator)\//.test(tags.badges || ''), first: tags['first-msg'] === '1' });
         if (+tags.bits > 0) onBits({ name, amount: +tags.bits });
         continue;
@@ -3586,8 +3608,8 @@ function pixelCog(N = 21, teeth = 8) {
       for (const [v, t] of f.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; inp.appendChild(o); }
       wrapF.append(lab, inp);
     } else {
-      inp = document.createElement('input');
-      inp.type = f.type === 'num' ? 'number' : f.type;
+      inp = document.createElement(f.type === 'area' ? 'textarea' : 'input');
+      if (f.type !== 'area') inp.type = f.type === 'num' ? 'number' : f.type;
       if (f.type === 'num') { inp.min = f.min; inp.max = f.max; inp.step = f.step; }
       if (f.ph) inp.placeholder = f.ph;
       inp.spellcheck = false; inp.autocomplete = 'off';
